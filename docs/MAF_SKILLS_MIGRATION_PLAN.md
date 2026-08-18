@@ -6,7 +6,7 @@
 
 ## Goal
 
-Migrate the application from the custom `SkillRegistry` / `SkillInjector` runtime to Microsoft Agent Framework native `SkillsProvider`, while preserving the existing Python agents, React/Vite Activity UI, multi-agent delegation, SSE streaming, Azure AI Search, Databricks analytics, citations, and Anthropic-inspired skill progress experience.
+Migrate the application from the custom `SkillRegistry` / `SkillInjector` runtime to Microsoft Agent Framework native `SkillsProvider`, while preserving the existing Python agents, React/Vite Activity UI, multi-agent delegation, SSE streaming, Databricks analytics, and Anthropic-inspired skill progress experience.
 
 The directory `anthropic-ai-claude-code-2.1.88-restored/` is read-only reference material and must never be modified.
 
@@ -72,7 +72,7 @@ Status: complete
 4. Filter skills by requesting agent:
    - `DataInsightAgent`: `analytics-spec` and approved analytics skills.
    - `MetadataAgent`: `metadata-mapping` and approved metadata skills.
-   - `MasterAgent` / `SearchAgent`: no Databricks skills unless explicitly assigned.
+   - `MasterAgent`: no Databricks skills unless explicitly assigned.
 5. Keep a temporary read-only adapter for `/skills` API compatibility.
 
 Validation:
@@ -88,7 +88,7 @@ Status: complete
 2. Remove their hand-written `load_skill` functions.
 3. Remove custom XML skill injection from those agents.
 4. Preserve all existing non-skill tools and prompts.
-5. Keep MasterAgent and SearchAgent behavior unchanged except for required framework compatibility.
+5. Keep MasterAgent behavior unchanged except for required framework compatibility.
 
 Validation:
 - Highest-spending-customer query loads `analytics-spec` and executes the silver SQL template.
@@ -137,7 +137,7 @@ Backend checks:
 - Python compile/import suite.
 - Agent construction and thread/session checks.
 - Mock streaming contracts for text, reasoning, function call/result, and skills.
-- Real RAG query: embedding, hybrid retrieval, semantic ranking, citations.
+- Real ontology-driven analytical query: OWL business context lookup, Unity Catalog verification, SQL execution.
 - Real data query: metadata delegation, skill load, SQL execution, final answer.
 - Negative routing: category/trend queries skip `analytics-spec`.
 

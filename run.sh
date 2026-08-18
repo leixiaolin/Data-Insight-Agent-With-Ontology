@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# run.sh — MAF Data Insight Agent launcher
+# run.sh — Ontology Data Agent launcher
 #
 # Usage:
 #   ./run.sh            Start the full stack (FastAPI + React)

@@ -113,10 +113,10 @@ flowchart TD
 
     subgraph UI["Frontend"]
         direction LR
-        React(["React + TypeScript"])
+        React(["React + TypeScript\nport 3000"])
     end
 
-    subgraph Backend["FastAPI Backend"]
+    subgraph Backend["FastAPI Backend · port 8000"]
         API["SSE /chat/stream"]
     end
 
@@ -128,15 +128,16 @@ flowchart TD
     end
 
     subgraph AgentLayer["Agent Layer — Microsoft Agent Framework · Azure OpenAI"]
-        MA(["🧠 MasterAgent\n Agentic Loop"])
-        OA(["🧬 OntologyRouter + OntologyAgent"])
-        META(["🗂️ MetadataAgent"])
+        MA(["🧠 MasterAgent\nBounded agentic loop"])
+        OA(["OntologyRouter + OntologyAgent"])
         DIA(["📊 DataInsightAgent"])
-        MA --> OA & META & DIA
+        META(["🗂️ MetadataAgent"])
+        MA --> OA & DIA & META
     end
 
-    subgraph AzureServices["Azure OpenAI"]
-        AOAI["☁️ Reason + Instant GPT LLM"]
+    subgraph AzureServices["Azure Services"]
+        AOAI["☁️ Azure OpenAI\nprimary + small GPT deployments"]
+        AIF["Azure AI Foundry\nOptional external evaluation"]
     end
 
     subgraph Databricks["Azure Databricks"]
@@ -155,9 +156,7 @@ flowchart TD
     DIA --> SQLW
     META --> SQLW
     MA --> AOAI
-    OA --> AOAI
-    META --> AOAI
-    DIA --> AOAI
+    API -.->|exported logs, when configured externally| AIF
 ```
 
 MasterAgent 是唯一的编排入口，通过 Microsoft Agent Framework 的有界 agentic loop 委派给三个子智能体。每个子智能体都是独立的 MAF Agent，各自拥有自己的工具集和 Skill 挂载。关于 Data Agent 的 Harness 后面有机会另起文章详细介绍。

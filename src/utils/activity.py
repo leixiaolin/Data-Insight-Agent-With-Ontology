@@ -6,14 +6,11 @@ from typing import Any, Optional
 from uuid import uuid4
 
 DELEGATION_AGENTS = {
-    "search_knowledge": "SearchAgent",
-    "search_multiple_queries": "SearchAgent",
     "delegate_metadata": "MetadataAgent",
     "delegate_data_analysis": "DataInsightAgent",
 }
 
 _TOOL_LABELS = {
-    "decompose_query": "Decompose query",
     "execute_sql": "Execute SQL",
     "list_schemas": "List schemas",
     "list_tables": "List tables",
@@ -36,7 +33,6 @@ _TOOL_LABELS = {
 }
 
 _DETAIL_KEYS = {
-    "decompose_query": "original_query",
     "execute_sql": "sql",
     "list_schemas": "catalog",
     "list_tables": "schema",
@@ -57,6 +53,7 @@ _DETAIL_KEYS = {
     "recover_ontology_context": "reason",
 }
 
+# `search_tables` is the MetadataAgent Unity Catalog lookup; the UI groups these rows together.
 _SEARCH_TOOLS = {"search_tables"}
 _ONTOLOGY_TOOLS = {
     "search_entities",
@@ -230,8 +227,6 @@ def tool_activity(
         }
 
     detail = args.get(_DETAIL_KEYS.get(tool_name, ""))
-    if tool_name == "search_multiple_queries":
-        detail = "\n".join(str(query) for query in (args.get("queries") or [])[:5])
 
     return {
         "id": f"tool-{call_id}",

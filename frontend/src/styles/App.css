@@ -924,9 +924,15 @@
 }
 
 .empty-state-icon {
-  font-size: 64px;
-  margin-bottom: 16px;
-  opacity: 0.5;
+  width: 112px;
+  height: 112px;
+  margin-bottom: 20px;
+}
+
+.empty-state-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
 }
 
 .empty-state-title {
@@ -938,4 +944,6 @@
 .empty-state-desc {
   color: var(--text-secondary);
   margin-bottom: 24px;
+  max-width: 620px;
+  line-height: 1.7;
 }

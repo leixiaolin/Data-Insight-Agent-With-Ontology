@@ -1,5 +1,5 @@
 """
-Logging utility module for the Agentic RAG application.
+Logging utility module for the Ontology Data Agent.
 Provides centralized logging configuration and utilities.
 
 All application loggers share a single TimedRotatingFileHandler attached to the

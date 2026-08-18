@@ -3,7 +3,7 @@ Metadata Agent — reads schema and metadata from Azure Databricks Unity Catalog
 
 Architecture
 ------------
-* Same MAF pattern as SearchAgent and DataInsightAgent.
+* Same MAF pattern as DataInsightAgent.
 * Uses the Databricks SDK (`databricks-sdk`) for Unity Catalog REST API access.
 * Falls back to `databricks-sql-connector` metadata queries when the SDK is unavailable.
 * Deterministically recalls and batch-fetches candidates before one model verification turn.

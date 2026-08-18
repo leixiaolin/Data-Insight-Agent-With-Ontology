@@ -3,7 +3,7 @@ Data Insight Agent — executes analytical SQL / SparkSQL against Azure Databric
 
 Architecture
 ------------
-* Built on the same Microsoft Agent Framework (MAF) pattern as SearchAgent.
+* Built on the same Microsoft Agent Framework (MAF) pattern as the other sub-agents.
 * Uses MAF OpenAIChatCompletionClient + function tools and the Databricks SQL connector.
 * Receives schema context from MetadataAgent (injected as part of the question).
 * MAF SkillsProvider advertises and loads agent-scoped skills on demand.

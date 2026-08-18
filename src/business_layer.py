@@ -1,7 +1,7 @@
 """Workspace-level business semantic layer authored by business users.
 
 The document is kept as a data file rather than a Python module or Skill so it is never
-imported or executed; swapping the two function bodies moves storage to Blob or a database.
+imported or executed; swapping the two function bodies moves storage to object storage or a database.
 """
 
 from __future__ import annotations

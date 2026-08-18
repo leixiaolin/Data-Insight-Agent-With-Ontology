@@ -9,9 +9,6 @@ Before starting, ensure you have:
 - ✅ Java 11+ installed (for optional HermiT startup reasoning)
 - ✅ Azure subscription with active resources
 - ✅ Azure OpenAI service with a primary tool-capable GPT deployment and a small Metadata deployment
-- ✅ Azure AI Search service with semantic search + vector search configured
-- ✅ text-embedding-3-large model deployed (3072 dimensions)
-- ✅ Azure Blob Storage container (for document/image URL resolution)
 - ✅ (Optional) Azure Databricks workspace with Unity Catalog SQL Warehouse
 - ✅ Network access to all Azure services
 
@@ -51,12 +48,8 @@ cd frontend && npm install && cd ..
    | `AZURE_OPENAI_ENDPOINT` | Azure OpenAI resource endpoint URL |
    | `AZURE_OPENAI_AUTH_MODE` | `auto` \| `key` \| `aad` (default: `auto`) |
    | `AZURE_OPENAI_API_KEY` | API key — required for `AUTH_MODE=key`; optional in `auto`, which otherwise uses AAD |
-   | `AZURE_OPENAI_GPT_DEPLOYMENT` | Primary deployment for Master, Search, Ontology routing/recovery, and DataInsight |
+   | `AZURE_OPENAI_GPT_DEPLOYMENT` | Primary deployment for Master, Ontology routing/recovery, and DataInsight |
    | `AZURE_OPENAI_GPT_SMALL_DEPLOYMENT` | Smaller tool-capable deployment for Metadata discovery/verification |
-   | `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | Name of your text-embedding-3-large deployment |
-   | `AZURE_SEARCH_ENDPOINT` | Azure AI Search endpoint URL |
-   | `AZURE_SEARCH_API_KEY` | Azure AI Search admin/query key |
-   | `AZURE_SEARCH_INDEX_NAME` | Name of your search index |
 
 4. **Auth mode selection**:
 
@@ -73,43 +66,7 @@ cd frontend && npm install && cd ..
      # "Cognitive Services OpenAI User" role on the resource
      ```
 
-### Step 3: Verify Azure AI Search Index Schema
-
-Your index must match the schema expected by `AzureSearchConfig`. Default field names:
-
-| Field | Default name | Notes |
-|-------|-------------|-------|
-| Document ID | `id` | Key field (Edm.String) |
-| Content | `content` | Searchable (Edm.String) |
-| Title | `title` | Searchable (Edm.String) |
-| File path | `filepath` | Filterable |
-| Public URL | `url` | Used for citations |
-| Content vector | `contentVector` | Collection(Edm.Single), 3072d |
-| Metadata vector | `full_metadata_vector` | Collection(Edm.Single), 3072d |
-| Main title | `main_title` | Top-level document title |
-| Sub title | `sub_title` | Section title |
-| Publisher | `publisher` | e.g. standard body name |
-| Document code | `document_code` | Standard/regulation number |
-
-All field names are overridable via `AZURE_SEARCH_*_FIELD` environment variables in `.env`.
-
-**Semantic search**: Create a semantic configuration named `default` (or set `AZURE_SEARCH_SEMANTIC_CONFIG`).  
-**Vector search**: Use profile name `vectorSearchProfile` (or set `AZURE_SEARCH_VECTOR_PROFILE`).
-
-### Step 4: Configure Blob Storage (for Citations)
-
-To show clickable citation links, set your Blob Storage details:
-```
-AZURE_BLOB_BASE_URL=https://<account>.blob.core.windows.net/<container>
-AZURE_BLOB_SAS_TOKEN="sp=rl&st=...&se=...&sv=...&sr=c&sig=..."
-
-AZURE_IMAGE_BASE_URL=https://<account>.blob.core.windows.net/<image-container>
-AZURE_IMAGE_SAS_TOKEN="sp=r&st=...&se=...&spr=https&sv=...&sr=c&sig=..."
-```
-
-Documents with no public URL are still cited as plain-text footnotes.
-
-### Step 5: Configure Ontology Runtime
+### Step 3: Configure Ontology Runtime
 
 Owlready2 recursively loads repository OWL files without modifying them. Defaults:
 
@@ -135,7 +92,7 @@ HermiT startup reasoning is disabled by default; enable it only with `ONTOLOGY_E
 
 The normal analytics handoff is linear and does not return to the Master LLM between sub-agents. If DataInsightAgent detects an unexpectedly missing or incomplete handoff, its own MAF loop may recover Metadata or enabled Ontology context once before continuing. Disabled Ontology and known upstream Ontology failures are never retried.
 
-### Step 6: (Optional) Configure Databricks
+### Step 4: (Optional) Configure Databricks
 
 For the DataInsightAgent and MetadataAgent:
 ```
@@ -154,7 +111,7 @@ When the three connection values are absent, `DatabricksConfig.is_configured()` 
 
 Metadata recall lists table summaries up to `METADATA_INDEX_MAX_TABLES`, scores them against question/ontology terms, and batch-fetches at most `METADATA_CANDIDATE_MAX_TABLES` candidate details before the model turn. If recall finds no candidate and the exposed schema has no more than `METADATA_SNAPSHOT_MAX_TABLES`, it falls back to the complete schema; larger schemas use MetadataAgent tools for discovery. Object caches are process-local and keyed by catalog/schema list or fully qualified table. Set the TTL to `0` for a process-lifetime object cache.
 
-### Step 7: (Optional) Author the Business Layer Document
+### Step 5: (Optional) Author the Business Layer Document
 
 Business users can describe semantics the OWL ontology does not define — terminology, metric definitions, and reporting conventions. Open the React UI and click **Business Layer Doc** in the chat header, or call the API directly:
 
@@ -167,7 +124,7 @@ curl -X PUT http://localhost:8000/business-layer \
 
 The text is stored at `data/business_layer.md` (git-ignored), shared by every session, and read on each request, so edits apply to the next question without restarting. It is advisory: verified Unity Catalog schema always wins, and the document is never treated as instructions. No configuration is required — when the file is absent the feature stays inert.
 
-### Step 8: Run the Application
+### Step 6: Run the Application
 
 ```bash
 ./run.sh             # Full stack: FastAPI (port 8000) + React (port 3000)
@@ -194,26 +151,12 @@ python -c "from src.ontology import OntologyService; s=OntologyService(enable_re
 curl http://localhost:8000/config
 ```
 
-### Test search tool
-
-```python
-from src.tools import create_search_tool
-import asyncio
-
-tool = create_search_tool()
-results = asyncio.run(tool.search("test query", top_k=3))
-print(f"Retrieved {len(results)} results")
-```
-
 ### Test agent initialization
 
 ```python
-from src.tools import create_search_tool
-from src.agents import SearchAgent, MasterAgent
+from src.agents import MasterAgent, MetadataAgent
 
-search_tool = create_search_tool()
-search_agent = SearchAgent(search_tool=search_tool)
-master = MasterAgent(search_agent=search_agent)
+master = MasterAgent(metadata_agent=MetadataAgent())
 print("All agents initialized")
 ```
 
@@ -242,17 +185,6 @@ AZURE_OPENAI_AUTH_MODE=aad
 ```
 Then run `az login` and ensure your identity has the *Cognitive Services OpenAI User* role.
 
-### "Search returns no results"
-
-1. Verify index name in `.env` matches Azure portal
-2. Check `AZURE_SEARCH_VECTOR_FIELD=contentVector` matches your index schema
-3. Confirm embedding dimensions = 3072 (`AZURE_SEARCH_VECTOR_DIMENSIONS=3072`)
-4. Test search directly:
-   ```bash
-   curl -H "api-key: $AZURE_SEARCH_API_KEY" \
-     "$AZURE_SEARCH_ENDPOINT/indexes/$AZURE_SEARCH_INDEX_NAME?api-version=2023-11-01"
-   ```
-
 ### DataInsight/Metadata tools report configuration errors
 
 Set the three required Databricks variables:
@@ -268,18 +200,15 @@ DATABRICKS_HOST, DATABRICKS_TOKEN, DATABRICKS_HTTP_PATH
 
 ## 📚 Next Steps
 
-1. Load your data into the Azure AI Search index
-2. Enable semantic search in Azure Portal and set `AZURE_SEARCH_SEMANTIC_CONFIG`
-3. Test example questions via the React UI
-4. Review logs in `logs/` for debugging
-5. Customize agent prompts in the per-agent modules under `src/prompts/` (`master.py`, `search.py`, `ontology.py`, `data_insight.py`, `metadata.py`)
-6. Add domain skills to `skills/` directory
+1. Test example questions via the React UI
+2. Review logs in `logs/` for debugging
+3. Customize agent prompts in the per-agent modules under `src/prompts/` (`master.py`, `ontology.py`, `data_insight.py`, `metadata.py`)
+4. Add domain skills to `skills/` directory
 
 ## 🔐 Security Notes
 
 - Never commit `.env` to version control (it is in `.gitignore`)
 - Use `AZURE_OPENAI_AUTH_MODE=aad` with Managed Identity for production
-- Rotate SAS tokens before expiry
 - Scope Databricks PAT tokens to minimum required permissions
 
 ## 📊 Monitoring
@@ -291,7 +220,6 @@ tail -f logs/application_$(date +%Y%m%d).log
 ## 🎓 Learning Resources
 
 - [Microsoft Agent Framework Documentation](https://learn.microsoft.com/en-us/agent-framework/)
-- [Azure AI Search Documentation](https://learn.microsoft.com/en-us/azure/search/)
 - [Azure OpenAI Service Documentation](https://learn.microsoft.com/en-us/azure/ai-services/openai/)
 - [Azure Databricks Unity Catalog](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/)
 

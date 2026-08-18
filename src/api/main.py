@@ -13,7 +13,6 @@ GET   /business-layer       Read the workspace business semantic document
 PUT   /business-layer       Save the workspace business semantic document
 GET   /skills               List available skills
 GET   /config               Return non-sensitive runtime capability defaults
-GET   /proxy-image          Proxy allowlisted Azure Blob images
 GET   /health               Health check
 
 SSE event format (matches what the frontend expects)
@@ -48,9 +47,9 @@ from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional
 from urllib.parse import parse_qsl, urlsplit, urlunsplit, unquote
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from src.agents import (
@@ -58,11 +57,9 @@ from src.agents import (
     MasterAgent,
     MetadataAgent,
     OntologyAgent,
-    SearchAgent,
 )
 from src.ontology import OntologyService
-from src.tools import AzureAISearchTool
-from src.config import AppConfig, AzureSearchConfig
+from src.config import AppConfig
 from src.business_layer import load_business_layer, save_business_layer
 from src.utils import get_logger
 from src.utils.activity import (
@@ -113,12 +110,6 @@ async def lifespan(app: FastAPI):
 
     # Initialise agents and their native MAF Skill providers.
     try:
-        search_tool = AzureAISearchTool(
-            enable_semantic_reranker=AppConfig.DEFAULT_ENABLE_SEMANTIC_RERANKER,
-            enable_agentic_retrieval=AppConfig.DEFAULT_ENABLE_AGENTIC_RETRIEVAL,
-        )
-        search_agent = SearchAgent(search_tool=search_tool)
-
         # MetadataAgent and DataInsightAgent are optional (need Databricks config)
         metadata_agent: Optional[MetadataAgent] = None
         data_insight_agent: Optional[DataInsightAgent] = None
@@ -148,7 +139,6 @@ async def lifespan(app: FastAPI):
         logger.info("DataInsightAgent initialised.")
 
         state.master_agent = MasterAgent(
-            search_agent=search_agent,
             data_insight_agent=data_insight_agent,
             metadata_agent=metadata_agent,
             ontology_agent=ontology_agent,
@@ -173,8 +163,8 @@ async def lifespan(app: FastAPI):
 # ─── FastAPI app ───────────────────────────────────────────────────────────────
 
 app = FastAPI(
-    title="MAF Data Insight Agent API",
-    description="Enterprise AI agent backend (search + data insight + metadata)",
+    title="Ontology Data Agent API",
+    description="Enterprise AI agent backend (ontology-driven data insight + metadata)",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -349,427 +339,6 @@ async def _cached_response_stream(
     yield _sse({"type": "done", "content": cached_response, "cache_hit": True})
 
 
-def _ensure_blob_sas_url(url: str, is_image: bool = False) -> str:
-    """Ensure a blob storage URL carries SAS params for private storage accounts.
-
-    IMPORTANT: The SAS token is appended as a raw query string rather than being
-    decoded through parse_qsl / urlencode. The round-trip decode-then-encode can
-    silently corrupt the 'sig' field because urllib.parse.parse_qsl treats '+' as
-    a space (HTML form-data convention), which changes the base64 signature.
-    """
-    if not url or "blob.core.windows.net" not in url:
-        return url
-
-    token = AzureSearchConfig.IMAGE_SAS_TOKEN if is_image else AzureSearchConfig.SAS_TOKEN
-    if not token:
-        return url
-
-    parsed = urlsplit(url.strip().replace("<", "").replace(">", ""))
-
-    # Check for existing SAS signature using decoded key names (safe — we only
-    # inspect keys, not values).
-    existing_keys = {k.lower() for k, _ in parse_qsl(parsed.query, keep_blank_values=True)}
-    if "sig" in existing_keys:
-        return url
-
-    # Append the raw token string verbatim — NO decode / re-encode cycle — so the
-    # sig value is never mangled.
-    token_clean = token.lstrip("?&")
-    sep = "&" if parsed.query else ""
-    new_query = parsed.query + sep + token_clean
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, parsed.fragment))
-
-
-def _patch_blob_urls_with_sas(text: str) -> str:
-    """
-    Patch all blob.core.windows.net URLs in model output with SAS tokens.
-    Handles markdown links/images and bare URLs in references.
-    """
-    if not text or "blob.core.windows.net" not in text:
-        return text
-
-    blob_url_pattern = re.compile(r"https://[^\s\]\)>\"']*blob\.core\.windows\.net[^\s\]\)>\"']*", re.IGNORECASE)
-
-    def _repl(match: re.Match) -> str:
-        raw = match.group(0)
-        trail = ""
-        while raw and raw[-1] in ".,;":
-            trail = raw[-1] + trail
-            raw = raw[:-1]
-        is_image = "pictureindoc" in raw.lower()
-        return _ensure_blob_sas_url(raw, is_image=is_image) + trail
-
-    return blob_url_pattern.sub(_repl, text)
-
-
-def _extract_search_references(result_text: str) -> Dict[str, tuple[str, str]]:
-    """
-    Parse search_knowledge tool result text into citation reference map:
-    {"1": ("title", "url"), ...}
-    """
-    refs: Dict[str, tuple[str, str]] = {}
-    if not result_text:
-        return refs
-
-    current_num: Optional[str] = None
-    current_title: Optional[str] = None
-
-    for raw_line in result_text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        m = re.match(r"\[(\d+)\]\s*(.*)$", line)
-        if m:
-            current_num = m.group(1)
-            current_title = m.group(2).strip()
-            continue
-
-        if current_num and line.startswith("Source:"):
-            url = line.split("Source:", 1)[1].strip()
-            if url and "Internal Document" not in url:
-                refs[current_num] = (current_title or f"Reference {current_num}", url)
-            else:
-                refs[current_num] = (current_title or f"Reference {current_num}", "")
-            current_num = None
-            current_title = None
-
-    return refs
-
-
-def _clean_reference_url(raw_url: str) -> str:
-    """Normalize a markdown reference URL and strip optional title suffix."""
-    if not raw_url:
-        return ""
-
-    candidate = str(raw_url).strip()
-    if not candidate:
-        return ""
-
-    candidate = candidate.strip("<>").strip()
-
-    # Markdown destination may contain optional title text: (url "title")
-    if " " in candidate:
-        candidate = candidate.split()[0].strip()
-
-    candidate = candidate.rstrip(".,;")
-
-    if not re.match(r"^https?://", candidate, flags=re.I):
-        return ""
-
-    return candidate
-
-
-def _derive_reference_title(num: str, title: str, url: str) -> str:
-    """Prefer explicit titles; otherwise infer from URL basename."""
-    normalized = (title or "").strip()
-    if normalized and not _is_generic_reference_title(normalized):
-        return normalized
-
-    cleaned_url = _clean_reference_url(url)
-    if cleaned_url:
-        parsed = urlsplit(cleaned_url)
-        basename = parsed.path.rsplit("/", 1)[-1].strip()
-        if basename:
-            return unquote(basename)
-
-    return f"Reference {num}"
-
-
-def _extract_explicit_references_block(refs_text: str) -> Dict[str, tuple[str, str]]:
-    """Parse an existing References block into {num: (title, url)}."""
-    refs: Dict[str, tuple[str, str]] = {}
-
-    # ── Pattern 1: consolidated range  [1]–[N] title\nurl  ───────────────────
-    # The LLM sometimes collapses identical-document citations into one entry like:
-    #   [1]–[8] GB/T 31485-2015 document title
-    #   https://storage.blob.core.windows.net/...
-    for m in re.finditer(
-        r"\[(\d+)\][–—-]+\[(\d+)\]\s+([^\n]+?)\s*\n\s*(https?://\S+)",
-        refs_text,
-    ):
-        start_num = int(m.group(1))
-        end_num = int(m.group(2))
-        title = m.group(3).strip()
-        url = _clean_reference_url(m.group(4))
-        if url:
-            for n in range(start_num, end_num + 1):
-                num_str = str(n)
-                refs.setdefault(num_str, (_derive_reference_title(num_str, title, url), url))
-
-    # Also handle consolidated range where URL is on same line after title
-    for m in re.finditer(
-        r"\[(\d+)\][–—-]+\[(\d+)\]\s+(.*?)\s+(https?://\S+)",
-        refs_text,
-    ):
-        start_num = int(m.group(1))
-        end_num = int(m.group(2))
-        title = m.group(3).strip()
-        url = _clean_reference_url(m.group(4))
-        if url:
-            for n in range(start_num, end_num + 1):
-                num_str = str(n)
-                refs.setdefault(num_str, (_derive_reference_title(num_str, title, url), url))
-
-    # ── Pattern 2: standard markdown link  [N] [title](url)  ────────────────
-    for m in re.finditer(r"\[(\d+)\]\s*\[(.*?)\]\(([^)]+)\)", refs_text, re.S):
-        num = m.group(1)
-        title = (m.group(2) or "").strip()
-        url = _clean_reference_url(m.group(3))
-        if url:
-            refs.setdefault(num, (_derive_reference_title(num, title, url), url))
-
-    # ── Pattern 3: bare URL  [N]: url  or  [N] url  ─────────────────────────
-    for m in re.finditer(r"\[(\d+)\]\s*[:：]?\s*(https?://\S+)", refs_text, re.S):
-        num = m.group(1)
-        url = _clean_reference_url(m.group(2))
-        if url:
-            refs.setdefault(num, (_derive_reference_title(num, "", url), url))
-
-    # ── Pattern 4: plain-text title  [N] text (no URL)  ─────────────────────
-    for m in re.finditer(r"\[(\d+)\]\s+([^\n\[][^\n]*)", refs_text):
-        num = m.group(1)
-        title = m.group(2).strip()
-        if title and not title.lower().startswith("http"):
-            refs.setdefault(num, (title, ""))
-
-    return refs
-
-
-def _extract_inline_citation_links(body: str) -> Dict[str, tuple[str, str]]:
-    """Extract inline citation links like [[3]](url) from answer body."""
-    refs: Dict[str, tuple[str, str]] = {}
-    for m in re.finditer(r"\[\[(\d+)\]\]\(([^)]+)\)", body):
-        n = m.group(1)
-        url = _clean_reference_url(m.group(2))
-        if url:
-            refs[n] = (_derive_reference_title(n, "", url), url)
-    return refs
-
-
-def _extract_search_references_from_payload(payload: Any) -> Dict[str, tuple[str, str]]:
-    """
-    Best-effort parse of search references from a function_result payload.
-    Handles string, dict, and list payload structures.
-    """
-    refs: Dict[str, tuple[str, str]] = {}
-    if payload is None:
-        return refs
-
-    if isinstance(payload, str):
-        return _extract_search_references(payload)
-
-    if isinstance(payload, dict):
-        for key in ("result", "content", "text", "output", "value"):
-            if key in payload:
-                refs.update(_extract_search_references_from_payload(payload.get(key)))
-        return refs
-
-    if isinstance(payload, list):
-        for item in payload:
-            refs.update(_extract_search_references_from_payload(item))
-        return refs
-
-    return refs
-
-
-def _is_generic_reference_title(title: str) -> bool:
-    if not title:
-        return True
-    normalized = title.strip()
-
-    # Explicit placeholder titles
-    if re.fullmatch(r"Reference\s+\d+", normalized, flags=re.I):
-        return True
-
-    # UUID-like filenames / ids, e.g. 2ff6f160-6a7c-45e5-a037-79c174eb4488.pdf
-    if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}\.pdf", normalized):
-        return True
-
-    # Indexed path-like placeholders, e.g. ai_search_regulation_doc/2ff6f160-...
-    if re.fullmatch(r"[\w\-]+/[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}", normalized):
-        return True
-
-    return False
-
-
-def _merge_references(
-    base: Dict[str, tuple[str, str]],
-    incoming: Dict[str, tuple[str, str]],
-) -> Dict[str, tuple[str, str]]:
-    """Merge refs while preserving non-generic titles and freshest non-empty URL."""
-    for num, (new_title, new_url) in incoming.items():
-        new_title = (new_title or "").strip() or f"Reference {num}"
-        new_url = (new_url or "").strip()
-
-        if num not in base:
-            base[num] = (new_title, new_url)
-            continue
-
-        old_title, old_url = base[num]
-        old_title = (old_title or "").strip() or f"Reference {num}"
-        old_url = (old_url or "").strip()
-
-        if _is_generic_reference_title(old_title) and not _is_generic_reference_title(new_title):
-            merged_title = new_title
-        else:
-            merged_title = old_title
-
-        merged_url = new_url or old_url
-        base[num] = (merged_title, merged_url)
-
-    return base
-
-
-def _split_body_and_refs(text: str) -> tuple[str, str]:
-    """
-    Split response into (body, refs_text).
-    Supports both explicit 'References:' heading and implicit trailing reference lists.
-    """
-    if "References:" in text:
-        return text.split("References:", 1)
-
-    implicit = re.search(r"\n\s*\[(\d+)\]\s*\[.*?\]\(https?://[^)]+\)", text, re.S)
-    if implicit:
-        idx = implicit.start()
-        return text[:idx], text[idx:]
-
-    # Also detect plain-URL reference lists: [1] https://...
-    implicit2 = re.search(r"\n\s*\[(\d+)\]\s+https?://\S", text, re.S)
-    if implicit2:
-        idx = implicit2.start()
-        return text[:idx], text[idx:]
-
-    return text, ""
-
-
-def _propagate_titles_by_url(
-    refs_map: Dict[str, tuple[str, str]],
-) -> Dict[str, tuple[str, str]]:
-    """
-    When several citation numbers share the same URL (or same URL with different
-    #page=N anchors, i.e. different pages of the same document), make sure they all
-    inherit the best (most descriptive) title instead of each keeping whatever title
-    fragment happened to be parsed first.
-    """
-
-    def _doc_group_keys(url: str) -> List[str]:
-        """Generate grouping keys so near-equivalent doc URLs share title context."""
-        if not url:
-            return []
-
-        cleaned = _clean_reference_url(url)
-        if not cleaned:
-            return []
-
-        parsed = urlsplit(cleaned)
-        path = parsed.path or ""
-        base_url = urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, ""))
-        no_query_no_fragment = urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
-
-        basename = path.rsplit("/", 1)[-1]
-        stem = basename.rsplit(".", 1)[0] if basename else ""
-
-        keys = [base_url, no_query_no_fragment]
-        if stem:
-            keys.append(stem)
-        return keys
-
-    # Build key → best_title mapping
-    key_best_title: Dict[str, str] = {}
-    for num, (title, url) in refs_map.items():
-        if not url:
-            continue
-        if not title or _is_generic_reference_title(title):
-            continue
-        for key in _doc_group_keys(url):
-            existing = key_best_title.get(key, "")
-            if not existing or _is_generic_reference_title(existing):
-                key_best_title[key] = title
-
-    # Fill in any still-generic or empty title from the best available
-    result: Dict[str, tuple[str, str]] = {}
-    for num, (title, url) in refs_map.items():
-        if url and (_is_generic_reference_title(title) or not title):
-            better = ""
-            for key in _doc_group_keys(url):
-                better = key_best_title.get(key, "")
-                if better:
-                    break
-            if better:
-                title = better
-        result[num] = (title, url)
-    return result
-
-
-def _normalize_citations_and_references(
-    body: str,
-    refs_map: Dict[str, tuple[str, str]],
-) -> tuple[str, List[str]]:
-    """
-    Ensure citation markers and references are consistent and sequential.
-    Citation markers are normalized to [[1]], [[2]], ... in order of appearance.
-    """
-    cited_markers = re.findall(r"\[\[(\d+)\]\]", body)
-
-    # English answers sometimes use [n] instead of [[n]]. Normalize it so the
-    # existing citation remap path can handle both styles consistently.
-    if not cited_markers:
-        single_style_markers = re.findall(r"(?<!\[)\[(\d+)\](?!\])", body)
-        if single_style_markers:
-            body = re.sub(r"(?<!\[)\[(\d+)\](?!\])", r"[[\1]]", body)
-            cited_markers = single_style_markers
-
-    if cited_markers:
-        ordered_old: List[str] = []
-        seen = set()
-        for n in cited_markers:
-            if n not in seen:
-                seen.add(n)
-                ordered_old.append(n)
-    else:
-        # Model sometimes omits inline footnotes; synthesize from best available refs.
-        if not refs_map:
-            return body, []
-        ordered_old = sorted(refs_map.keys(), key=lambda x: int(x))[:4]
-
-    remap = {old: str(i + 1) for i, old in enumerate(ordered_old)}
-
-    # Propagate best titles across citations sharing the same document URL.
-    refs_map = _propagate_titles_by_url(refs_map)
-
-    # Rewrite existing inline markers to keep numbering consistent.
-    if cited_markers:
-        body = re.sub(r"\[\[(\d+)\]\]", lambda m: f"[[{remap.get(m.group(1), m.group(1))}]]", body)
-    else:
-        # Model omitted inline markers (common for English answers).
-        # Inject clickable [[n]](url) markers at the end of the body so the reader
-        # can see and click the source links. Only inject refs that have a real URL.
-        marker_parts = []
-        for i, old in enumerate(ordered_old):
-            _, u = refs_map.get(old, ("", ""))
-            cleaned = _clean_reference_url(u)
-            if cleaned and re.match(r"^https?://", cleaned):
-                marker_parts.append(f"[[{i + 1}]]({cleaned})")
-        if marker_parts:
-            body = body.rstrip() + "\n\n" + " ".join(marker_parts)
-
-    ref_lines: List[str] = []
-    for old in ordered_old:
-        if old not in refs_map:
-            continue
-        new_num = remap[old]
-        title, url = refs_map[old]
-        cleaned_url = _clean_reference_url(url)
-        resolved_title = _derive_reference_title(new_num, title, cleaned_url)
-        if cleaned_url and re.match(r"^https?://", cleaned_url):
-            ref_lines.append(f"[{new_num}] [{resolved_title}]({cleaned_url})")
-        else:
-            ref_lines.append(f"[{new_num}] {resolved_title}")
-
-    return body, ref_lines
-
-
 def _table_row_cells(row: str) -> Optional[List[str]]:
     stripped = row.strip()
     if len(stripped) < 2 or not stripped.startswith("|") or not stripped.endswith("|"):
@@ -865,7 +434,6 @@ async def _stream_agent_response(
     ─ main loop: await combined.get() — wakes instantly when any item arrives
     """
     full_response_parts: List[str] = []
-    search_ref_map: Dict[str, tuple[str, str]] = {}
     _working_text_parts: List[str] = []
     _working_text_id = 1
     cache_failure_observed = False
@@ -1055,9 +623,6 @@ async def _stream_agent_response(
                 )
                 if exception or result_reason == "failure_response":
                     cache_failure_observed = True
-                parsed_refs = _extract_search_references_from_payload(result_payload)
-                if parsed_refs:
-                    _merge_references(search_ref_map, parsed_refs)
                 events.extend(_flush_pending_call())
                 call_id = getattr(content, "call_id", "") or ""
                 completed = _end_tool(call_id, error=bool(exception))
@@ -1092,10 +657,6 @@ async def _stream_agent_response(
                 full_response_parts.append(item_data)
                 yield _sse({"type": "text", "content": item_data})
 
-            elif item_type == "refs":
-                if isinstance(item_data, dict):
-                    _merge_references(search_ref_map, item_data)
-
             elif item_type == "activity" and isinstance(item_data, dict):
                 if item_data.get("state") == "error":
                     cache_failure_observed = True
@@ -1126,36 +687,14 @@ async def _stream_agent_response(
     full_response = "".join(full_response_parts)
 
     # Models occasionally preserve table pipes but collapse all row newlines.
-    # Repair that narrow malformed shape before citation/reference processing.
+    # Repair that narrow malformed shape before the response is returned.
     full_response = _repair_collapsed_markdown_tables(full_response)
 
     # Normalize markdown image alt from chunked figcaption form.
     full_response = re.sub(r'!\[<figcaption>(.*?)</figcaption>\]', r'![\1]', full_response)
     full_response = re.sub(r'!\[<figcaption></figcaption>\]', r'![]', full_response)
 
-    # Normalize references heading variants emitted by the model.
-    if "References:" not in full_response and "## References" in full_response:
-        full_response = full_response.replace("## References", "References:", 1)
-
-    # Build a unified references map (model-provided refs + parsed search refs), then
-    # normalize inline markers and references numbering to keep them consistent.
-    body_part, refs_part = _split_body_and_refs(full_response)
-    refs_from_answer = _extract_explicit_references_block(refs_part)
-    refs_from_inline = _extract_inline_citation_links(body_part)
-
-    unified_refs: Dict[str, tuple[str, str]] = {}
-    _merge_references(unified_refs, refs_from_inline)
-    _merge_references(unified_refs, refs_from_answer)
-    _merge_references(unified_refs, search_ref_map)
-
-    normalized_body, normalized_ref_lines = _normalize_citations_and_references(body_part, unified_refs)
-    if normalized_ref_lines:
-        full_response = normalized_body.rstrip() + "\n\nReferences:\n" + "\n\n".join(normalized_ref_lines)
-    else:
-        full_response = normalized_body.rstrip()
-
-    # Ensure every blob URL in the final answer is signed, regardless of how the LLM formats it.
-    full_response = _patch_blob_urls_with_sas(full_response)
+    full_response = full_response.rstrip()
 
     response_cache_eligible, _ = _response_cache_eligibility(full_response)
     _append_history(
@@ -1248,42 +787,6 @@ async def get_runtime_config():
         "default_enable_ontology": AppConfig.DEFAULT_ENABLE_ONTOLOGY,
         "ontology": _public_ontology_health(),
     }
-
-
-@app.get("/proxy-image")
-async def proxy_image(url: str = Query(..., description="Blob storage URL to proxy")):
-    """
-    Proxy images from Azure Blob Storage to avoid CORS restrictions in the browser.
-    Only proxies URLs from known blob.core.windows.net containers.
-    """
-    if "blob.core.windows.net" not in url:
-        raise HTTPException(status_code=403, detail="Only Azure Blob Storage URLs are supported.")
-
-    try:
-        import requests as _requests
-
-        def _fetch():
-            r = _requests.get(url, timeout=15)
-            return r.status_code, r.headers.get("Content-Type", "image/jpeg"), r.content
-
-        status_code, content_type, data = await asyncio.to_thread(_fetch)
-
-        if status_code != 200:
-            raise HTTPException(status_code=status_code, detail="Image not found in blob storage.")
-
-        return Response(
-            content=data,
-            media_type=content_type,
-            headers={
-                "Cache-Control": "public, max-age=3600",
-                "Access-Control-Allow-Origin": "*",
-            },
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.warning(f"Image proxy failed for {url[:80]}: {exc}")
-        raise HTTPException(status_code=502, detail=f"Failed to fetch image: {exc}")
 
 
 @app.post("/chat/stream")

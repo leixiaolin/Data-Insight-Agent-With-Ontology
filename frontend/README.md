@@ -1,4 +1,4 @@
-# Enterprise Data and Search Agent Frontend
+# Ontology Data Agent Frontend
 
 React 18, TypeScript, and Vite frontend for the FastAPI agent backend.
 
@@ -8,7 +8,7 @@ React 18, TypeScript, and Vite frontend for the FastAPI agent backend.
 - Per-session messages, in-flight state, stop controls, and Ontology setting
 - Collapsible agent/activity panel for narration, Skills, tools, SQL, and errors
 - Markdown and GitHub-flavored tables
-- Citation normalization with linked and plain-text references
+- Markdown rendering with GFM tables and collapsed-table repair
 - Workspace Business Layer document editor
 - Responsive dark interface
 

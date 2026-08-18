@@ -10,7 +10,6 @@ import json
 import time
 from pydantic import Field
 
-from .search_agent import SearchAgent
 from .data_insight_agent import DataInsightAgent
 from .metadata_agent import MetadataAgent
 from .ontology_agent import OntologyAgent
@@ -45,13 +44,12 @@ logger = get_logger(__name__)
 class MasterAgent:
     """
     Master Agent using Microsoft Agent Framework 1.11.
-    Orchestrates knowledge retrieval and answer generation.
+    Orchestrates the ontology-driven data-analysis pipeline and metadata lookups.
     Manages multi-turn conversations using agent threads.
     """
     
     def __init__(
         self,
-        search_agent: SearchAgent,
         data_insight_agent: Optional[DataInsightAgent] = None,
         metadata_agent: Optional[MetadataAgent] = None,
         ontology_agent: Optional[OntologyAgent] = None,
@@ -61,13 +59,11 @@ class MasterAgent:
         Initialize Master Agent.
 
         Args:
-            search_agent: Configured search agent (required).
             data_insight_agent: Optional DataInsightAgent for analytical queries.
             metadata_agent: Optional MetadataAgent for UC schema queries.
             ontology_agent: Optional OntologyAgent for OWL business context.
             agent_id: Unique identifier.
         """
-        self.search_agent = search_agent
         self.data_insight_agent = data_insight_agent
         self.metadata_agent = metadata_agent
         self.ontology_agent = ontology_agent
@@ -108,7 +104,6 @@ class MasterAgent:
     ) -> QueryEngineContext:
         return QueryEngineContext(
             original_question=message,
-            max_search_attempts=AppConfig.QUERY_ENGINE_MAX_SEARCH_ATTEMPTS,
             enable_ontology=(
                 AppConfig.DEFAULT_ENABLE_ONTOLOGY
                 if enable_ontology is None
@@ -124,10 +119,8 @@ class MasterAgent:
         message: str,
         *,
         enable_ontology: bool,
-        max_search_attempts: Optional[int] = None,
     ) -> str:
         """Tell the model which request-local pipeline can actually run."""
-        search_attempt_limit = max_search_attempts or AppConfig.QUERY_ENGINE_MAX_SEARCH_ATTEMPTS
         if enable_ontology:
             pipeline_handoff = (
                 "OntologyAgent -> conditional MetadataAgent -> DataInsightAgent"
@@ -138,8 +131,6 @@ class MasterAgent:
             "<session_runtime>\n"
             f"ontology_enabled={str(enable_ontology).lower()}\n"
             f"pipeline_handoff={pipeline_handoff}\n"
-            f"search_attempt_limit={search_attempt_limit}\n"
-            "search_attempt_limit_is_ceiling_not_target=true\n"
             "This request-local mode is authoritative for progress narration and delegation.\n"
             "</session_runtime>\n\n"
             "<original_user_message>\n"
@@ -173,7 +164,7 @@ class MasterAgent:
         )
     
     def _create_tools(self) -> List:
-        """Create function tools for delegating to search agent."""
+        """Create function tools for delegating to the sub-agents."""
 
         def push_stream_event(item_type: str, payload: Any) -> None:
             turn = self._current_turn()
@@ -257,119 +248,6 @@ class MasterAgent:
                 ),
             )
             return activity_id, time.perf_counter()
-
-        def start_search_activity(task: str) -> tuple[str, float, int]:
-            turn = self._current_turn()
-            turn_state = turn.progress if turn is not None else {}
-            activity_id = turn_state.get("search_agent_id")
-            started_at = turn_state.get("search_agent_started_at")
-            attempt = int(turn_state.get("search_attempts", 0)) + 1
-            if not activity_id:
-                activity_id = new_activity_id("searchagent")
-                started_at = time.perf_counter()
-                turn_state["search_agent_id"] = activity_id
-                turn_state["search_agent_started_at"] = started_at
-            turn_state["search_attempts"] = attempt
-            push_stream_event(
-                "activity",
-                agent_activity(
-                    activity_id,
-                    "SearchAgent",
-                    task,
-                    summary=f"Search attempt {attempt}",
-                    metrics={"attempts": attempt},
-                ),
-            )
-            return activity_id, float(started_at), attempt
-
-        def search_guard(queries: List[str], tool_name: str) -> Optional[str]:
-            """Block only exhausted, no-gain, or equivalent repeated retrieval calls."""
-            turn = self._current_turn()
-            if turn is None:
-                return None
-            turn_state = turn.progress
-            latest = str(turn_state.get("last_search_result") or "")
-            if turn.search_stopped_for_no_gain:
-                self._record_tool_outcome(
-                    "search_stopped_no_gain",
-                    success=False,
-                    retryable=False,
-                    summary="Search stopped after a retrieval added no new evidence",
-                    metadata={"requested_tool": tool_name},
-                )
-                return latest + (
-                    "\n\n<search_control>\n"
-                    "stop_reason=no_new_evidence\n"
-                    "instruction=Do not search again. Answer from accumulated evidence and "
-                    "state any unresolved limitation.\n"
-                    "</search_control>"
-                )
-            if not turn.register_search_request(queries):
-                self._record_tool_outcome(
-                    "search_duplicate_blocked",
-                    success=False,
-                    retryable=False,
-                    summary="Equivalent search query already executed",
-                    metadata={"requested_tool": tool_name},
-                )
-                return latest + (
-                    "\n\n<search_control>\n"
-                    "stop_reason=equivalent_query_already_executed\n"
-                    "instruction=Do not repeat this query. Answer now if evidence is sufficient; "
-                    "otherwise search only for a different concrete gap.\n"
-                    "</search_control>"
-                )
-            return None
-
-        def search_evidence_status(
-            results: List[Dict[str, Any]],
-            *,
-            attempt: int,
-            search_limit: int,
-        ) -> tuple[Dict[str, Any], str]:
-            """Expose evidence gain and remaining ceiling without deciding sufficiency."""
-            turn = self._current_turn()
-            gain: Dict[str, Any] = {
-                "selected_count": len(results),
-                "new_unique_count": len(results),
-                "overlap_count": 0,
-                "total_unique_count": len(results),
-                "no_new_evidence": False,
-            }
-            if turn is not None:
-                gain = dict(turn.register_search_results(results))
-            remaining = max(0, search_limit - attempt)
-            gain["attempt"] = attempt
-            gain["attempt_limit"] = search_limit
-            gain["remaining_attempts"] = remaining
-            if gain["no_new_evidence"]:
-                instruction = (
-                    "This retrieval added no new evidence. Stop searching and answer from the "
-                    "accumulated evidence, explicitly noting any unresolved limitation."
-                )
-            elif remaining == 0:
-                instruction = (
-                    "The search ceiling is exhausted. Answer from the accumulated evidence and "
-                    "explicitly note any unresolved limitation."
-                )
-            else:
-                instruction = (
-                    "Assess the accumulated evidence against the original user request. If every "
-                    "material claim is directly supported, stop searching and answer now. Search "
-                    "again only for a different concrete unresolved gap from the original request."
-                )
-            control = (
-                "\n\n<search_control>\n"
-                f"attempt={attempt}\n"
-                f"attempt_limit={search_limit}\n"
-                f"remaining_attempts={remaining}\n"
-                f"new_unique_evidence={gain['new_unique_count']}\n"
-                f"overlapping_evidence={gain['overlap_count']}\n"
-                f"total_unique_evidence={gain['total_unique_count']}\n"
-                f"instruction={instruction}\n"
-                "</search_control>"
-            )
-            return gain, control
 
         def finish_agent_activity(
             activity_id: str,
@@ -676,587 +554,6 @@ class MasterAgent:
             if stream_final_text and final_text:
                 push_stream_event("text", final_text)
             return final_text.strip()
-        
-        def decompose_query(
-            original_query: Annotated[str, Field(description="The original user question to decompose")],
-            num_subqueries: Annotated[int, Field(description="Number of sub-queries to generate (1-5)")] = 3
-        ) -> str:
-            """
-            Decompose a complex query into multiple focused sub-queries.
-            Use this when agentic retrieval is disabled and the question is complex.
-            Returns a list of sub-queries that can be searched independently.
-            """
-            logger.info(f"[Tool] decompose_query called for: '{original_query}' (num_subqueries={num_subqueries})")
-            tool_started_at = time.perf_counter()
-            
-            # Use LLM to decompose the query
-            decomposition_prompt = f"""Analyze this question and break it down into {num_subqueries} focused, independent sub-questions that together cover all aspects of the original question.
-
-Original Question: {original_query}
-
-Requirements:
-1. Each sub-question should be specific and independently searchable
-2. Repair only defective wording: misspellings, ambiguous abbreviations, and garbled or unclear phrasing
-3. Never add a qualifier the user did not state, including recency wording such as "latest", "current", or "in force", edition or version numbers, dates, regions, or extra requirements
-4. Use a formal name or synonym only to replace defective wording, never to narrow the question
-5. Sub-questions should cover different aspects without unnecessary overlap
-6. Preserve every constraint and comparison actually requested by the user
-7. Return ONLY the final search-ready sub-questions, numbered 1-{num_subqueries}
-
-Sub-questions:"""
-            
-            try:
-                import asyncio
-
-                decomposition_agent = create_maf_agent(
-                    name="QueryDecompositionAgent",
-                    instructions="Decompose the supplied question exactly as requested.",
-                    tools=[],
-                    reasoning_effort=AgentReasoningConfig.MASTER,
-                )
-                response = asyncio.run(run_agent(decomposition_agent, decomposition_prompt))
-                subqueries_text = response.text
-                
-                logger.info(f"[Tool] Query decomposed into:\\n{subqueries_text}")
-                self._record_tool_outcome(
-                    "decompose_query",
-                    success=bool(subqueries_text.strip()),
-                    summary=f"Prepared {num_subqueries} search-ready subqueries",
-                    metadata={"subquery_count": num_subqueries},
-                    started_at=tool_started_at,
-                )
-                return f"Successfully decomposed query. Sub-queries:\\n{subqueries_text}"
-                
-            except Exception as e:
-                logger.error(f"[Tool] decompose_query failed: {e}", exc_info=True)
-                self._record_tool_outcome(
-                    "decompose_query",
-                    success=False,
-                    summary=str(e),
-                    started_at=tool_started_at,
-                )
-                return f"Failed to decompose query: {str(e)}"
-        
-        def search_multiple_queries(
-            queries: Annotated[List[str], Field(description="List of search queries to execute in parallel")]
-        ) -> str:
-            """
-            Execute multiple search queries in parallel and return aggregated results.
-            Use this for complex questions that have been decomposed into sub-queries.
-            Before calling, emit a user-visible working sentence that explicitly names SearchAgent
-            and explains why these sub-queries are being delegated.
-            Returns formatted results from all searches with citations.
-            """
-            logger.info(f"[Tool] search_multiple_queries called with {len(queries)} queries: {queries}")
-            tool_started_at = time.perf_counter()
-            turn = self._current_turn()
-            turn_state = turn.progress if turn is not None else {}
-            search_limit = (
-                turn.max_search_attempts
-                if turn is not None
-                else AppConfig.QUERY_ENGINE_MAX_SEARCH_ATTEMPTS
-            )
-            if int(turn_state.get("search_attempts", 0)) >= search_limit:
-                self._record_tool_outcome(
-                    "search_budget_blocked",
-                    success=False,
-                    retryable=False,
-                    summary="Search attempt limit reached",
-                    metadata={"query_count": len(queries), "attempt_limit": search_limit},
-                    started_at=tool_started_at,
-                )
-                return (
-                    f"SearchAgent has reached the configured ceiling of {search_limit} retrieval attempts. "
-                    "Use the available evidence and clearly acknowledge any remaining gap."
-                )
-            guarded = search_guard(queries, "search_multiple_queries")
-            if guarded is not None:
-                return guarded
-            agent_activity_id, agent_started_at, search_attempt = start_search_activity(
-                "\n".join(queries[:5])
-            )
-            
-            import asyncio
-            
-            # Container for all results
-            all_results = {"results": [], "error": None}
-
-            def report_parallel_progress(progress: Dict[str, Any]) -> None:
-                stage = str(progress.get("stage") or "parallel_search")
-                metrics = progress.get("metrics") if isinstance(progress.get("metrics"), dict) else {}
-                if progress.get("query_index"):
-                    metrics = {**metrics, "query_index": progress["query_index"]}
-                metrics = {
-                    **metrics,
-                    "attempt": search_attempt,
-                    "attempt_limit": search_limit,
-                }
-                push_stream_event(
-                    "activity",
-                    stage_activity(
-                        f"{agent_activity_id}-attempt-{search_attempt}-{stage}",
-                        agent_activity_id,
-                        "SearchAgent",
-                        (
-                            f"Attempt {search_attempt}: "
-                            + str(progress.get("message") or stage.replace("_", " ").title())
-                        ),
-                        state=str(progress.get("state") or "running"),
-                        detail=progress.get("detail"),
-                        category=str(progress.get("category") or "search"),
-                        metrics=metrics,
-                    ),
-                )
-            
-            def run_parallel_searches():
-                try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        # Execute all searches in parallel
-                        results_list = loop.run_until_complete(
-                            self.search_agent.search_tool.parallel_search(
-                                queries,
-                                progress_callback=report_parallel_progress,
-                            )
-                        )
-                        all_results["results"] = results_list
-                    finally:
-                        loop.close()
-                except Exception as e:
-                    all_results["error"] = e
-            
-            # Run in separate thread
-            thread = start_context_thread(run_parallel_searches, daemon=True)
-            thread_finished = wait_for_context_thread(thread, 60)
-            
-            if not thread_finished:
-                stop_context_thread(thread, "search_multiple_queries")
-                turn = self._current_turn()
-                if turn is not None and turn.cancelled:
-                    return "Search cancelled by user."
-                finish_agent_activity(
-                    agent_activity_id,
-                    "SearchAgent",
-                    "\n".join(queries[:5]),
-                    agent_started_at,
-                    error=True,
-                    summary="Parallel search timed out",
-                )
-                self._record_tool_outcome(
-                    "search_multiple_queries",
-                    success=False,
-                    summary="Parallel search timed out",
-                    metadata={"query_count": len(queries)},
-                    started_at=tool_started_at,
-                )
-                return "Search timeout: The parallel search operation took too long."
-            
-            if all_results["error"]:
-                error_msg = str(all_results["error"])
-                logger.error(f"[Tool] search_multiple_queries failed: {error_msg}", exc_info=True)
-                finish_agent_activity(
-                    agent_activity_id,
-                    "SearchAgent",
-                    "\n".join(queries[:5]),
-                    agent_started_at,
-                    error=True,
-                    summary=error_msg[:160],
-                )
-                self._record_tool_outcome(
-                    "search_multiple_queries",
-                    success=False,
-                    summary=error_msg,
-                    metadata={"query_count": len(queries)},
-                    started_at=tool_started_at,
-                )
-                return f"Parallel search error: {error_msg}"
-            
-            results_list = all_results["results"]
-            
-            if not results_list or all(len(r) == 0 for r in results_list):
-                logger.warning("[Tool] No results found for any query")
-                finish_agent_activity(
-                    agent_activity_id,
-                    "SearchAgent",
-                    "\n".join(queries[:5]),
-                    agent_started_at,
-                    summary="No relevant documents found",
-                    metrics={"query_count": len(queries), "selected_count": 0},
-                )
-                self._record_tool_outcome(
-                    "search_multiple_queries",
-                    success=False,
-                    summary="No relevant documents found for the subqueries",
-                    metadata={"query_count": len(queries), "selected_count": 0},
-                    started_at=tool_started_at,
-                )
-                return "No relevant documents found for any of the sub-queries."
-            
-            # Aggregate and deduplicate results
-            aggregation_stage_id = (
-                f"{agent_activity_id}-attempt-{search_attempt}-aggregate_results"
-            )
-            push_stream_event(
-                "activity",
-                stage_activity(
-                    aggregation_stage_id,
-                    agent_activity_id,
-                    "SearchAgent",
-                    "Aggregate unique documents",
-                    detail="Merge parallel result sets and remove duplicate document IDs",
-                    category="filtering",
-                    metrics={
-                        "query_count": len(queries),
-                        "raw_result_count": sum(len(result_set) for result_set in results_list),
-                    },
-                ),
-            )
-            seen_ids = set()
-            aggregated_results = []
-            citation_counter = 1
-            
-            for query_idx, query_results in enumerate(results_list):
-                logger.info(f"[Tool] Query {query_idx + 1} ('{queries[query_idx][:50]}...') returned {len(query_results)} results")
-                
-                for result in query_results:
-                    result_id = result.get('id')
-                    if result_id and result_id not in seen_ids:
-                        seen_ids.add(result_id)
-                        result['citation_number'] = citation_counter
-                        aggregated_results.append(result)
-                        citation_counter += 1
-
-            push_stream_event(
-                "activity",
-                stage_activity(
-                    aggregation_stage_id,
-                    agent_activity_id,
-                    "SearchAgent",
-                    "Aggregate unique documents",
-                    state="completed",
-                    detail="Merge parallel result sets and remove duplicate document IDs",
-                    category="filtering",
-                    metrics={
-                        "query_count": len(queries),
-                        "raw_result_count": sum(len(result_set) for result_set in results_list),
-                        "selected_count": len(aggregated_results),
-                    },
-                ),
-            )
-            
-            logger.info(f"[Tool] Aggregated {len(aggregated_results)} unique results from {len(queries)} queries")
-            
-            # Format aggregated results
-            returned_results = aggregated_results[:20]
-            formatted_results = []
-            formatted_results.append(
-                f"Found {len(returned_results)} relevant documents across "
-                f"{len(queries)} search queries:\\n"
-            )
-            
-            for i, result in enumerate(returned_results, 1):
-                content = result.get("content", "No content available")
-                title = result.get("title", "Untitled")
-                url = result.get("url") or "Internal Document"
-                score = result.get("score", 0)
-                reranker_score = result.get("reranker_score")
-                
-                formatted_results.append(f"\\n[{i}] {title}")
-                if reranker_score:
-                    formatted_results.append(f"Score: {score:.4f} | Reranker: {reranker_score:.4f}")
-                else:
-                    formatted_results.append(f"Score: {score:.4f}")
-                formatted_results.append(f"Content: {content}")
-                formatted_results.append(f"Source: {url}\\n")
-            
-            gain, search_control = search_evidence_status(
-                returned_results,
-                attempt=search_attempt,
-                search_limit=search_limit,
-            )
-            result_text = "\\n".join(formatted_results) + search_control
-            turn_state["last_search_result"] = result_text
-            finish_agent_activity(
-                agent_activity_id,
-                "SearchAgent",
-                "\n".join(queries[:5]),
-                agent_started_at,
-                summary=f"Selected {len(returned_results)} relevant documents",
-                metrics={
-                    "query_count": len(queries),
-                    "selected_count": len(returned_results),
-                    "attempts": search_attempt,
-                    "attempt_limit": search_limit,
-                    "remaining_attempts": gain["remaining_attempts"],
-                    "new_unique_count": gain["new_unique_count"],
-                    "overlap_count": gain["overlap_count"],
-                },
-            )
-            self._record_tool_outcome(
-                "search_multiple_queries",
-                success=True,
-                summary=f"Selected {len(returned_results)} relevant documents",
-                metadata={
-                    "query_count": len(queries),
-                    "selected_count": len(returned_results),
-                    **gain,
-                },
-                started_at=tool_started_at,
-            )
-            logger.info(f"[Tool] search_multiple_queries completed: {len(result_text)} chars")
-            return result_text
-        
-        def search_knowledge(
-            query: Annotated[str, Field(description="Query to search the knowledge base. Be specific.")]
-        ) -> str:
-            """
-            Search the enterprise knowledge base for relevant information.
-            Use this tool when you need to find information to answer user questions.
-            Before calling, emit a user-visible working sentence that explicitly names SearchAgent
-            and explains what evidence it should retrieve.
-            For simple, focused questions only. For complex questions, use decompose_query first.
-            Returns formatted search results with citations and image URLs when available.
-            """
-            logger.info(f"[Tool] search_knowledge called with query: '{query}'")
-            tool_started_at = time.perf_counter()
-            turn = self._current_turn()
-            turn_state = turn.progress if turn is not None else {}
-            search_limit = (
-                turn.max_search_attempts
-                if turn is not None
-                else AppConfig.QUERY_ENGINE_MAX_SEARCH_ATTEMPTS
-            )
-            if int(turn_state.get("search_attempts", 0)) >= search_limit:
-                logger.warning("SearchAgent attempt limit reached; reusing the latest search result.")
-                self._record_tool_outcome(
-                    "search_budget_blocked",
-                    success=False,
-                    retryable=False,
-                    summary="Search attempt limit reached",
-                    metadata={"attempt_limit": search_limit},
-                    started_at=tool_started_at,
-                )
-                return turn_state.get("last_search_result") or (
-                    f"SearchAgent has reached the configured ceiling of {search_limit} retrieval "
-                    "attempts for this turn. "
-                    "Use the available evidence and acknowledge any remaining gap."
-                )
-            guarded = search_guard([query], "search_knowledge")
-            if guarded is not None:
-                return guarded
-            agent_activity_id, agent_started_at, search_attempt = start_search_activity(query)
-
-            import asyncio
-
-            streaming_ctx = turn.stream_context if turn is not None else None
-
-            def _push_refs(refs: Dict[str, tuple[str, str]]):
-                if streaming_ctx is not None and refs:
-                    combined_q, ml = streaming_ctx
-                    try:
-                        ml.call_soon_threadsafe(combined_q.put_nowait, ("refs", refs))
-                    except Exception:
-                        pass
-
-            result_container: Dict[str, Any] = {"result": None, "error": None}
-
-            def report_search_progress(progress: Dict[str, Any]) -> None:
-                stage = str(progress.get("stage") or "search")
-                metrics = (
-                    dict(progress.get("metrics"))
-                    if isinstance(progress.get("metrics"), dict)
-                    else {}
-                )
-                metrics.update(
-                    {
-                        "attempt": search_attempt,
-                        "attempt_limit": search_limit,
-                    }
-                )
-                push_stream_event(
-                    "activity",
-                    stage_activity(
-                        f"{agent_activity_id}-attempt-{search_attempt}-{stage}",
-                        agent_activity_id,
-                        "SearchAgent",
-                        (
-                            f"Attempt {search_attempt}: "
-                            + str(progress.get("message") or stage.replace("_", " ").title())
-                        ),
-                        state=str(progress.get("state") or "running"),
-                        detail=progress.get("detail"),
-                        category=str(progress.get("category") or "search"),
-                        metrics=metrics,
-                    ),
-                )
-
-            def run_async_search():
-                try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        results_dict = loop.run_until_complete(
-                            self.search_agent.search_knowledge_base(
-                                query,
-                                progress_callback=report_search_progress,
-                            )
-                        )
-                        result_container["result"] = results_dict
-                    finally:
-                        loop.close()
-                except Exception as e:
-                    result_container["error"] = e
-
-            thread = start_context_thread(run_async_search, daemon=True)
-            thread_finished = wait_for_context_thread(thread, 30)
-
-            if not thread_finished:
-                stop_context_thread(thread, "search_knowledge")
-                turn = self._current_turn()
-                if turn is not None and turn.cancelled:
-                    return "Search cancelled by user."
-                finish_agent_activity(
-                    agent_activity_id,
-                    "SearchAgent",
-                    query,
-                    agent_started_at,
-                    error=True,
-                    summary="Knowledge search timed out",
-                )
-                self._record_tool_outcome(
-                    "search_knowledge",
-                    success=False,
-                    summary="Knowledge search timed out",
-                    metadata={"query": query},
-                    started_at=tool_started_at,
-                )
-                return "Search timeout: The search operation took too long to complete."
-
-            if result_container["error"]:
-                logger.error("[Tool] search_knowledge failed", exc_info=result_container["error"])
-                finish_agent_activity(
-                    agent_activity_id,
-                    "SearchAgent",
-                    query,
-                    agent_started_at,
-                    error=True,
-                    summary=str(result_container["error"])[:160],
-                )
-                self._record_tool_outcome(
-                    "search_knowledge",
-                    success=False,
-                    summary=str(result_container["error"]),
-                    metadata={"query": query},
-                    started_at=tool_started_at,
-                )
-                return f"An error occurred while searching: {str(result_container['error'])}"
-
-            results_dict = result_container["result"]
-
-            if not results_dict or not results_dict.get("results"):
-                logger.warning("[Tool] search_knowledge: No results found")
-                finish_agent_activity(
-                    agent_activity_id,
-                    "SearchAgent",
-                    query,
-                    agent_started_at,
-                    summary="No relevant documents found",
-                    metrics={"selected_count": 0},
-                )
-                self._record_tool_outcome(
-                    "search_knowledge",
-                    success=False,
-                    summary="No relevant documents found",
-                    metadata={"query": query, "selected_count": 0},
-                    started_at=tool_started_at,
-                )
-                return "No relevant documents found in the knowledge base for this query."
-
-            results = results_dict["results"]
-            logger.info(f"[Tool] Received {len(results)} results from search tool")
-            if results:
-                for i, res in enumerate(results[:3], 1):
-                    reranker_info = (
-                        f" | Reranker: {res.get('reranker_score'):.4f}"
-                        if res.get("reranker_score") is not None
-                        else " | Reranker: N/A"
-                    )
-                    logger.info(
-                        f"[Tool]   [{i}] Score: {res.get('score', 0):.4f}{reranker_info} | "
-                        f"Title: {res.get('title', 'N/A')[:60]}"
-                    )
-
-            formatted_parts = [f"Found {len(results)} relevant documents:\n"]
-            refs_map: Dict[str, tuple[str, str]] = {}
-            for result in results:
-                content = result.get("content", "No content available")
-                title = (result.get("title") or "Untitled")
-                url = result.get("url", "Internal Document (No URL)")
-                citation_id = result.get("citation_id", "?")
-                score = result.get("score", 0)
-                reranker_score = result.get("reranker_score")
-                image_urls = result.get("image_urls", [])
-                formatted_parts.append(f"\n[{citation_id}] {title}")
-                if reranker_score:
-                    formatted_parts.append(f"Score: {score:.4f} | Reranker: {reranker_score:.4f}")
-                else:
-                    formatted_parts.append(f"Score: {score:.4f}")
-                formatted_parts.append(f"Content: {content}")
-                # Append any separately-stored images (from image_mapping field) so the
-                # LLM can include them in its response per the IMAGE RULE.
-                if image_urls:
-                    for img_url in image_urls:
-                        formatted_parts.append(f"Image: ![图片]({img_url})")
-                formatted_parts.append(f"Source: {url}\n")
-
-                if (
-                    isinstance(citation_id, str)
-                    and citation_id.isdigit()
-                    and url
-                    and "Internal Document" not in str(url)
-                ):
-                    refs_map[citation_id] = (str(title).strip() or f"Reference {citation_id}", str(url).strip())
-
-            gain, search_control = search_evidence_status(
-                results,
-                attempt=search_attempt,
-                search_limit=search_limit,
-            )
-            result_text = "\n".join(formatted_parts) + search_control
-            turn_state["last_search_result"] = result_text
-            _push_refs(refs_map)
-            finish_agent_activity(
-                agent_activity_id,
-                "SearchAgent",
-                query,
-                agent_started_at,
-                summary=f"Selected {len(results)} relevant documents",
-                metrics={
-                    "selected_count": len(results),
-                    "attempts": search_attempt,
-                    "attempt_limit": search_limit,
-                    "remaining_attempts": gain["remaining_attempts"],
-                    "new_unique_count": gain["new_unique_count"],
-                    "overlap_count": gain["overlap_count"],
-                    "semantic_ranking": self.search_agent.search_tool.enable_semantic_reranker,
-                    "agentic_retrieval": self.search_agent.search_tool.enable_agentic_retrieval,
-                },
-            )
-            self._record_tool_outcome(
-                "search_knowledge",
-                success=True,
-                summary=f"Selected {len(results)} relevant documents",
-                metadata={
-                    "query": query,
-                    "selected_count": len(results),
-                    **gain,
-                },
-                started_at=tool_started_at,
-            )
-            logger.info(f"[Tool] search_knowledge completed: {len(results)} results, {len(result_text)} chars")
-            # Return plain result text — thinking steps already pushed in real-time above
-            return result_text
         
         # ── New delegation tools ───────────────────────────────────────────────
 
@@ -2141,9 +1438,6 @@ Sub-questions:"""
                         turn.progress["data_pipeline_activity_id"] = previous_pipeline_id
 
         return [
-            decompose_query,
-            search_multiple_queries,
-            search_knowledge,
             delegate_metadata,
             delegate_data_analysis,
         ]
@@ -2151,20 +1445,13 @@ Sub-questions:"""
     def _create_agent(self):
         """Create and return the MAF MasterAgent."""
         tools = self._create_tools()
-        
-        # Add agentic retrieval status to system prompt
-        agentic_status = "ENABLED" if self.search_agent.search_tool.enable_agentic_retrieval else "DISABLED"
-        
+
         enhanced_prompt = f"""{MASTER_AGENT_PROMPT}
 
 **CURRENT CONFIGURATION:**
-- Agentic Retrieval: {agentic_status}
-- Semantic Reranker: {'ENABLED' if self.search_agent.search_tool.enable_semantic_reranker else 'DISABLED'}
 - DataInsightAgent: {'AVAILABLE' if self.data_insight_agent else 'NOT CONFIGURED'}
 - MetadataAgent: {'AVAILABLE' if self.metadata_agent else 'NOT CONFIGURED'}
-- OntologyAgent: {'AVAILABLE' if self.ontology_agent else 'NOT CONFIGURED'}
-
-Remember: When agentic retrieval is {agentic_status}, follow the corresponding workflow described above."""
+- OntologyAgent: {'AVAILABLE' if self.ontology_agent else 'NOT CONFIGURED'}"""
         
         agent = create_maf_agent(
             name="MasterAgent",
@@ -2222,7 +1509,6 @@ Remember: When agentic retrieval is {agentic_status}, follow the corresponding w
             contextual_message = self._with_runtime_context(
                 message,
                 enable_ontology=turn.enable_ontology,
-                max_search_attempts=turn.max_search_attempts,
             )
             response_stream = stream_agent(
                 self.agent,
@@ -2233,21 +1519,3 @@ Remember: When agentic retrieval is {agentic_status}, follow the corresponding w
                 yield update
         finally:
             context_var.reset(token)
-    
-    def update_config(
-        self,
-        enable_semantic_reranker: Optional[bool] = None,
-        enable_agentic_retrieval: Optional[bool] = None
-    ):
-        """
-        Update search configuration.
-        
-        Args:
-            enable_semantic_reranker: Enable/disable semantic reranker
-            enable_agentic_retrieval: Enable/disable agentic retrieval
-        """
-        self.search_agent.update_config(
-            enable_semantic_reranker=enable_semantic_reranker,
-            enable_agentic_retrieval=enable_agentic_retrieval
-        )
-        logger.info("MasterAgent configuration updated")

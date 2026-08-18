@@ -28,7 +28,6 @@ const metricLabels: Record<string, string> = {
   cutoff: 'cutoff',
   query_count: 'queries',
   tool_calls: 'tool calls',
-  search_attempts: 'search attempts',
 };
 
 const NativeDetails: React.FC<{

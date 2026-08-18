@@ -35,8 +35,8 @@ class _FakeMasterAgent:
             contents=[
                 _Content(
                     "function_call",
-                    name="search_knowledge",
-                    arguments='{"query":"source"}',
+                    name="delegate_metadata",
+                    arguments='{"question":"source"}',
                     call_id="call-1",
                 )
             ]

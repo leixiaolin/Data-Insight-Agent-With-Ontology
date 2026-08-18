@@ -2,7 +2,7 @@
 
 ## 🚀 Production Deployment Guide
 
-This guide covers deploying the Enterprise Agentic RAG Chatbot to production. The system consists of two deployable components:
+This guide covers deploying the Ontology Data Agent to production. The system consists of two deployable components:
 
 - **FastAPI backend** (`src/api/main.py`) — Python, serves SSE streaming and REST endpoints
 - **React frontend** (`frontend/`) — TypeScript/Vite, communicates with the backend over HTTP
@@ -11,11 +11,6 @@ This guide covers deploying the Enterprise Agentic RAG Chatbot to production. Th
 
 ### Azure Resources
 - [ ] Azure OpenAI resource with a primary tool-capable GPT deployment and a small Metadata deployment
-- [ ] text-embedding-3-large deployment (3072 dimensions)
-- [ ] Azure AI Search service with semantic search + vector search configured
-- [ ] Search index (`index-dev-figure-01-chunk` schema or equivalent) loaded with data
-- [ ] Azure Blob Storage container (for document URL resolution + SAS token)
-- [ ] Azure Blob Storage container for images (optional)
 - [ ] External log/evaluation destination if required (not wired by this repository)
 - [ ] Azure Databricks workspace with Unity Catalog SQL Warehouse (optional, for DataInsight)
 - [ ] Auth decision: API key (`AZURE_OPENAI_AUTH_MODE=key`) or Managed Identity (`aad`)
@@ -27,7 +22,7 @@ This guide covers deploying the Enterprise Agentic RAG Chatbot to production. Th
 - [ ] `logs/`, `tmp/`, `data/` directories writable
 - [ ] `data/business_layer.md` persisted on durable storage if the business layer document must survive redeploys (it is git-ignored and node-local)
 - [ ] Network connectivity to all Azure services verified
-- [ ] Security review of SAS token expiry dates
+- [ ] Security review of credential rotation policy
 
 ## 🌐 Deployment Options
 
@@ -70,13 +65,6 @@ az webapp config appsettings set \
     AZURE_OPENAI_AUTH_MODE="aad" \
     AZURE_OPENAI_GPT_DEPLOYMENT="<primary-deployment>" \
     AZURE_OPENAI_GPT_SMALL_DEPLOYMENT="<small-deployment>" \
-    AZURE_OPENAI_EMBEDDING_DEPLOYMENT="text-embedding-3-large" \
-    AZURE_OPENAI_EMBEDDING_DIMENSIONS="3072" \
-    AZURE_SEARCH_ENDPOINT="<value>" \
-    AZURE_SEARCH_API_KEY="<value>" \
-    AZURE_SEARCH_INDEX_NAME="<value>" \
-    AZURE_BLOB_BASE_URL="<blob-base-url>" \
-    AZURE_BLOB_SAS_TOKEN="<sas-token>" \
     DATABRICKS_HOST="<value>" \
     DATABRICKS_TOKEN="<value>" \
     DATABRICKS_HTTP_PATH="<value>" \
@@ -135,7 +123,7 @@ CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```bash
 az acr build \
   --registry <your-acr> \
-  --image agentic-rag-backend:latest \
+  --image ontology-data-agent-backend:latest \
   --file Dockerfile .
 ```
 
@@ -159,7 +147,7 @@ EXPOSE 80
 ```bash
 az acr build \
   --registry <your-acr> \
-  --image agentic-rag-frontend:latest \
+  --image ontology-data-agent-frontend:latest \
   --build-arg VITE_API_BASE_URL=https://<backend-fqdn> \
   --file Dockerfile.frontend .
 ```
@@ -170,8 +158,8 @@ az acr build \
 # Backend
 az containerapp create \
   --resource-group <your-rg> \
-  --name agentic-rag-backend \
-  --image <your-acr>.azurecr.io/agentic-rag-backend:latest \
+  --name ontology-data-agent-backend \
+  --image <your-acr>.azurecr.io/ontology-data-agent-backend:latest \
   --target-port 8000 \
   --ingress external \
   --env-vars \
@@ -183,8 +171,8 @@ az containerapp create \
 # Frontend
 az containerapp create \
   --resource-group <your-rg> \
-  --name agentic-rag-frontend \
-  --image <your-acr>.azurecr.io/agentic-rag-frontend:latest \
+  --name ontology-data-agent-frontend \
+  --image <your-acr>.azurecr.io/ontology-data-agent-frontend:latest \
   --target-port 80 \
   --ingress external
 ```
@@ -233,21 +221,9 @@ az webapp config appsettings set \
   --settings DATABRICKS_TOKEN="<new-token>"
 ```
 
-### SAS Token Rotation
-
-`AZURE_BLOB_BASE_URL` and `AZURE_BLOB_SAS_TOKEN` must be rotated before expiry. Check current expiry:
-```bash
-echo "$AZURE_BLOB_SAS_TOKEN" | grep "se="
-```
-
-Update in App Service:
-```bash
-az webapp config appsettings set ... --settings AZURE_BLOB_SAS_TOKEN="<new-sas>"
-```
-
 ### Enable Azure Private Link
 
-- Configure Private Endpoints for Azure OpenAI, Azure AI Search, and Azure Blob Storage
+- Configure Private Endpoints for Azure OpenAI
 - Deploy the App Service / Container App inside a VNet with service endpoints
 
 ## 📊 Monitoring Setup
@@ -290,7 +266,7 @@ jobs:
       run: pip install -r requirements.txt
 
     - name: Run Python tests
-      run: ONTOLOGY_ENABLE_REASONER=false python -m pytest test_script -q --ignore=test_script/test_search.py -p no:cacheprovider
+      run: ONTOLOGY_ENABLE_REASONER=false python -m pytest test_script -q -p no:cacheprovider
 
     - name: Set up Node.js
       uses: actions/setup-node@v4
@@ -356,7 +332,7 @@ Use App Service deployment slots or separate resources per environment:
 
 ## 📝 Post-Deployment Tasks
 
-1. **Verify functionality**: Test each question type (RAG, data insight, metadata)
+1. **Verify functionality**: Test each question type (data insight with ontology on/off, metadata)
 2. **Check skill loading**: `GET /skills` returns `analytics-spec`, `sql-planning`, and `metadata-mapping`
 3. **Monitor logs**: `az webapp log tail --resource-group <your-rg> --name <your-app-name>`
 4. **Set up Azure Monitor alerts**
@@ -369,8 +345,6 @@ Use App Service deployment slots or separate resources per environment:
 **403 AuthenticationTypeDisabled** — Switch to `AZURE_OPENAI_AUTH_MODE=aad` and assign the correct role to the Managed Identity.
 
 **DataInsight tools report configuration errors** — Verify `DATABRICKS_HOST`, `DATABRICKS_TOKEN`, and `DATABRICKS_HTTP_PATH`; then check that the SQL warehouse is running.
-
-**Citations have no links** — Blob Storage SAS token may be expired or `AZURE_BLOB_BASE_URL` is missing. Update `AZURE_BLOB_SAS_TOKEN` in app settings.
 
 **Slow cold start** — Pre-warm the app using App Service "Always On" setting or health-check pings.
 

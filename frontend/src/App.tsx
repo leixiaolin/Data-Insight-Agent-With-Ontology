@@ -8,12 +8,8 @@ import remarkGfm from 'remark-gfm';
 import { ActivityPanel } from './components/ActivityPanel';
 import type { ActivityItem, ActivityKind, ActivityState } from './types/activity';
 
-// Example questions spanning the enterprise knowledge base and Databricks analytics
+// Example questions covering the Databricks analytics and ontology-driven data insight paths
 const EXAMPLE_QUERIES = [
-  "汽车用液化天然气的加液口基本构型",
-  "电动汽车用动力蓄电池安全要求",
-  "What are the recall criteria for defective automotive products",
-  "什么是management body, 它在乘用车法规里做什么用的，目前发行了几个版本",
   "哪个客户在2023年的消费是最高的",
   "按月看2023年的销售额趋势",
   "哪个地区的成交量是最高的，在这个地区那个产品销量最高，并且结合数据分析原因",
@@ -30,62 +26,6 @@ interface MessageWithThinking extends ChatMessage {
 }
 
 const EMPTY_MESSAGES: MessageWithThinking[] = [];
-
-const normalizeReferenceUrl = (rawUrl: string): string => {
-  if (!rawUrl) return '';
-  let candidate = rawUrl.trim().replace(/^<|>$/g, '').trim();
-  if (!candidate) return '';
-
-  const firstToken = candidate.split(/\s+/)[0]?.trim() || '';
-  candidate = firstToken.replace(/^<|>$/g, '').replace(/[.,;]+$/g, '');
-
-  if (!/^https?:\/\//i.test(candidate)) return '';
-  return candidate;
-};
-
-const isGenericReferenceTitle = (title: string): boolean => {
-  const normalized = (title || '').trim();
-  if (!normalized) return true;
-  if (/^Reference\s+\d+$/i.test(normalized)) return true;
-  if (/^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}(\.pdf)?$/.test(normalized)) return true;
-  if (/^[\w-]+\/[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}(\.pdf)?$/.test(normalized)) return true;
-  return false;
-};
-
-const deriveTitleFromUrl = (num: string, title: string, url: string): string => {
-  const normalizedTitle = (title || '').trim();
-  if (normalizedTitle && !isGenericReferenceTitle(normalizedTitle)) {
-    return normalizedTitle;
-  }
-
-  if (url) {
-    try {
-      const pathname = new URL(url).pathname;
-      const fileName = decodeURIComponent(pathname.split('/').pop() || '').trim();
-      if (fileName) return fileName;
-    } catch {
-      // ignore and fallback
-    }
-  }
-
-  return normalizedTitle || `Reference ${num}`;
-};
-
-const referenceGroupKeys = (url: string): string[] => {
-  const cleanUrl = normalizeReferenceUrl(url);
-  if (!cleanUrl) return [];
-
-  try {
-    const parsed = new URL(cleanUrl);
-    const noFragment = `${parsed.origin}${parsed.pathname}${parsed.search}`;
-    const noQueryNoFragment = `${parsed.origin}${parsed.pathname}`;
-    const baseName = decodeURIComponent(parsed.pathname.split('/').pop() || '').trim();
-    const stem = baseName.replace(/\.[^.]+$/, '');
-    return [noFragment, noQueryNoFragment, stem].filter(Boolean);
-  } catch {
-    return [cleanUrl.split('#')[0]];
-  }
-};
 
 const tableRowCells = (row: string): string[] | null => {
   const stripped = row.trim();
@@ -156,156 +96,95 @@ export const repairCollapsedMarkdownTables = (content: string): string => {
   return repairedLines.join('\n');
 };
 
-const normalizeCitationsForDisplay = (content: string): string => {
-  if (!content) return content;
-
-  let body = content;
-  let refsText = '';
-
-  if (content.includes('References:')) {
-    const parts = content.split('References:');
-    body = parts[0] || '';
-    refsText = parts.slice(1).join('References:') || '';
-  } else {
-    const implicitRefStart = content.search(/\n\s*\[\d+\]\s*\[.*?\]\(https?:\/\/[^)]+\)/s);
-    if (implicitRefStart >= 0) {
-      body = content.slice(0, implicitRefStart);
-      refsText = content.slice(implicitRefStart);
-    }
-  }
-
-  const refsMap = new Map<string, { title: string; url: string }>();
-  for (const m of refsText.matchAll(/\[(\d+)\]\s*\[(.*?)\]\(([^)]+)\)/g)) {
-    const num = m[1];
-    const url = normalizeReferenceUrl(m[3]);
-    const title = (m[2] || '').trim();
-    if (url) {
-      refsMap.set(num, { title: deriveTitleFromUrl(num, title, url), url });
-    }
-  }
-
-  for (const m of refsText.matchAll(/\[(\d+)\]\s+((?!\[)[^\n]+)/g)) {
-    const num = m[1];
-    if (!refsMap.has(num)) {
-      refsMap.set(num, { title: (m[2] || '').trim() || `Reference ${num}`, url: '' });
-    }
-  }
-
-  for (const m of body.matchAll(/\[\[(\d+)\]\]\(([^)]+)\)/g)) {
-    const num = m[1];
-    const url = normalizeReferenceUrl(m[2]);
-    if (!refsMap.has(num) && url) {
-      refsMap.set(num, { title: deriveTitleFromUrl(num, '', url), url });
-    }
-  }
-
-  const keyBestTitle = new Map<string, string>();
-  refsMap.forEach((item) => {
-    const normalizedTitle = (item.title || '').trim();
-    if (!normalizedTitle || isGenericReferenceTitle(normalizedTitle)) return;
-    referenceGroupKeys(item.url).forEach((key) => {
-      if (!keyBestTitle.has(key)) keyBestTitle.set(key, normalizedTitle);
-    });
-  });
-
-  refsMap.forEach((item, num) => {
-    const normalizedTitle = (item.title || '').trim();
-    if (normalizedTitle && !isGenericReferenceTitle(normalizedTitle)) return;
-    for (const key of referenceGroupKeys(item.url)) {
-      const better = keyBestTitle.get(key);
-      if (better) {
-        refsMap.set(num, { ...item, title: better });
-        break;
-      }
-    }
-  });
-
-  const citedOrder: string[] = [];
-  for (const m of body.matchAll(/\[\[(\d+)\]\]/g)) {
-    if (!citedOrder.includes(m[1])) citedOrder.push(m[1]);
-  }
-
-  const remaining = Array.from(refsMap.keys()).filter(k => !citedOrder.includes(k));
-  const mergedOrder = [...citedOrder, ...remaining];
-  if (mergedOrder.length === 0) {
-    return body.trimEnd();
-  }
-
-  const remap = new Map<string, string>();
-  mergedOrder.forEach((oldNum, idx) => remap.set(oldNum, String(idx + 1)));
-
-  let normalizedBody = body.replace(/\[\[(\d+)\]\]\(([^)]+)\)/g, (_all, oldNum, rawUrl) => {
-    const newNum = remap.get(oldNum) || oldNum;
-    const cleanUrl = normalizeReferenceUrl(rawUrl) || rawUrl;
-    return `[[${newNum}]](${cleanUrl})`;
-  });
-  normalizedBody = normalizedBody.replace(/\[\[(\d+)\]\]/g, (_all, oldNum) => {
-    const newNum = remap.get(oldNum) || oldNum;
-    return `[[${newNum}]]`;
-  });
-
-  const refLines = mergedOrder.map(oldNum => {
-    const item = refsMap.get(oldNum);
-    const newNum = remap.get(oldNum) || oldNum;
-    if (!item) return '';
-    const cleanUrl = normalizeReferenceUrl(item.url);
-    const resolvedTitle = deriveTitleFromUrl(newNum, item.title, cleanUrl);
-    if (cleanUrl && /^https?:\/\//.test(cleanUrl)) {
-      return `[${newNum}] [${resolvedTitle}](${cleanUrl})`;
-    }
-    return `[${newNum}] ${resolvedTitle}`;
-  }).filter(Boolean);
-
-  if (refLines.length === 0) {
-    return normalizedBody.trimEnd();
-  }
-
-  return `${normalizedBody.trimEnd()}\n\nReferences:\n${refLines.join('\n\n')}`;
-};
-
-// ── Stable component for proxied blob images (hooks must live in a named component) ──
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/$/, '');
 const apiUrl = (path: string) => `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
 
-const ProxiedImage: React.FC<{ src?: string; alt?: string }> = ({ src, alt }) => {
-  const [failed, setFailed] = React.useState(false);
+// Ontology mark: a hub-and-satellite knowledge graph inside an orbiting inference ring.
+const OntologyMark: React.FC = () => (
+  <svg viewBox="0 0 120 120" role="img" aria-label="Ontology Data Agent" focusable="false">
+    <defs>
+      <linearGradient id="onto-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stopColor="#4a9eff" />
+        <stop offset="55%" stopColor="#06b6d4" />
+        <stop offset="100%" stopColor="#a855f7" />
+      </linearGradient>
+      <radialGradient id="onto-core" cx="35%" cy="30%" r="80%">
+        <stop offset="0%" stopColor="#cfe9ff" />
+        <stop offset="45%" stopColor="#4a9eff" />
+        <stop offset="100%" stopColor="#a855f7" />
+      </radialGradient>
+      <filter id="onto-glow" x="-60%" y="-60%" width="220%" height="220%">
+        <feGaussianBlur stdDeviation="3.4" result="blur" />
+        <feMerge>
+          <feMergeNode in="blur" />
+          <feMergeNode in="SourceGraphic" />
+        </feMerge>
+      </filter>
+    </defs>
 
-  const normalizedSrc = React.useMemo(() => {
-    if (!src) return '';
-    return src.trim().replace(/^<|>$/g, '');
-  }, [src]);
+    <circle cx="60" cy="60" r="52" fill="url(#onto-grad)" opacity="0.07" />
 
-  const resolvedSrc = React.useMemo(() => {
-    if (!normalizedSrc) return normalizedSrc;
-    if (normalizedSrc.includes('/proxy-image?url=')) {
-      return normalizedSrc;
-    }
-    if (normalizedSrc.includes('blob.core.windows.net')) {
-      return apiUrl(`/proxy-image?url=${encodeURIComponent(normalizedSrc)}`);
-    }
-    return normalizedSrc;
-  }, [normalizedSrc]);
+    <g stroke="url(#onto-grad)" fill="none" strokeLinecap="round">
+      <circle
+        cx="60"
+        cy="60"
+        r="52"
+        strokeWidth="1.6"
+        strokeDasharray="10 12"
+        opacity="0.65"
+      >
+        <animateTransform
+          attributeName="transform"
+          type="rotate"
+          from="0 60 60"
+          to="360 60 60"
+          dur="24s"
+          repeatCount="indefinite"
+        />
+      </circle>
 
-  if (!normalizedSrc) return null;
+      {/* hexagonal relation ring */}
+      <polygon
+        points="60,20 94.6,40 94.6,80 60,100 25.4,80 25.4,40"
+        strokeWidth="1.8"
+        opacity="0.45"
+      />
 
-  if (failed) {
-    return (
-      <a href={normalizedSrc} target="_blank" rel="noopener noreferrer" className="img-fallback-link">
-        🖼️ {alt || '查看图片'}
-      </a>
-    );
-  }
+      {/* hub-to-class edges */}
+      <g strokeWidth="2.6" opacity="0.9">
+        <line x1="60" y1="60" x2="60" y2="20" />
+        <line x1="60" y1="60" x2="94.6" y2="80" />
+        <line x1="60" y1="60" x2="25.4" y2="80" />
+      </g>
+    </g>
 
-  return (
-    <img
-      src={resolvedSrc}
-      alt={alt || ''}
-      className="msg-image"
-      loading="lazy"
-      onError={() => setFailed(true)}
-    />
-  );
-};
+    <g fill="url(#onto-grad)" filter="url(#onto-glow)">
+      <circle cx="60" cy="20" r="7.5" />
+      <circle cx="94.6" cy="80" r="7.5" />
+      <circle cx="25.4" cy="80" r="7.5" />
+    </g>
+
+    <g fill="url(#onto-grad)" opacity="0.55">
+      <circle cx="94.6" cy="40" r="4.2" />
+      <circle cx="60" cy="100" r="4.2" />
+      <circle cx="25.4" cy="40" r="4.2" />
+    </g>
+
+    <circle cx="60" cy="60" r="15" fill="url(#onto-core)" filter="url(#onto-glow)" />
+
+    {/* data grain inside the hub */}
+    <g fill="#0b1220" opacity="0.75">
+      <rect x="54.5" y="61" width="3" height="7" rx="1.4" />
+      <rect x="58.5" y="56" width="3" height="12" rx="1.4" />
+      <rect x="62.5" y="58.5" width="3" height="9.5" rx="1.4" />
+    </g>
+
+    <circle cx="60" cy="60" r="21" fill="none" stroke="url(#onto-grad)" strokeWidth="1.4" opacity="0.5">
+      <animate attributeName="r" values="21;25;21" dur="3.6s" repeatCount="indefinite" />
+      <animate attributeName="opacity" values="0.5;0.05;0.5" dur="3.6s" repeatCount="indefinite" />
+    </circle>
+  </svg>
+);
 
 function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -675,9 +554,7 @@ function App() {
         thinkingForMessage = thinkingForMessage.map(item => item.state === 'running'
           ? { ...item, state: 'completed' }
           : item);
-        assistantContent = normalizeCitationsForDisplay(
-          repairCollapsedMarkdownTables(assistantContent)
-        );
+        assistantContent = repairCollapsedMarkdownTables(assistantContent);
         didFinalize = true;
 
         updateSessionMessages(sessionId, prev => {
@@ -832,7 +709,7 @@ function App() {
       {/* Sidebar */}
       <div className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
         <div className="sidebar-header">
-          <h1 className="sidebar-title gradient-text">MAF Data Insight</h1>
+          <h1 className="sidebar-title gradient-text">Ontology Data Agent</h1>
           <button
             className="toggle-btn"
             onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
@@ -953,7 +830,7 @@ function App() {
       <div className="main-content">
         <div className="chat-header">
           <div className="chat-title">
-            {currentSessionId ? `Session: ${currentSessionId.substring(0, 20)}...` : 'MAF Data Insight Agent'}
+            {currentSessionId ? `Session: ${currentSessionId.substring(0, 20)}...` : 'Ontology Data Agent'}
           </div>
           <div className="header-actions">
             <button
@@ -971,12 +848,15 @@ function App() {
             <div className="chat-container" ref={chatContainerRef}>
               {messages.length === 0 ? (
                 <div className="empty-state">
-                  <div className="empty-state-icon">🤖</div>
-                  <h2 className="empty-state-title">Welcome to MAF Data Insight Agent</h2>
+                  <div className="empty-state-icon"><OntologyMark /></div>
+                  <h2 className="empty-state-title">Welcome to Ontology Data Agent</h2>
                   <p className="empty-state-desc">
-                    Ask me anything about enterprise knowledge, vehicle data analytics, or Databricks schema.
+                    Ask a business question in your own words. An OWL ontology resolves the business
+                    meaning, Unity Catalog verifies the physical tables and columns, and the analysis
+                    runs as read-only SQL on Databricks.
                     <br />
-                    Try one of the example queries from the sidebar to get started!
+                    Toggle Ontology in the sidebar to compare ontology-guided and metadata-only analysis,
+                    or try one of the example queries to get started.
                   </p>
                 </div>
               ) : (
@@ -1032,8 +912,7 @@ function App() {
                                       {children}
                                     </a>
                                   );
-                                },
-                                img: ({ src, alt }) => <ProxiedImage src={src} alt={alt} />
+                                }
                               }}
                             >
                               {repairCollapsedMarkdownTables(msg.content)}
@@ -1064,7 +943,7 @@ function App() {
                   value={inputValue}
                   onChange={(e) => setInputValue(e.target.value)}
                   onKeyPress={handleKeyPress}
-                  placeholder="Ask about enterprise standards, data analytics, or Databricks schema..."
+                  placeholder="Ask about business metrics, data analytics, or Databricks schema..."
                   disabled={isLoading}
                 />
                 <button
