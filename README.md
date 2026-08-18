@@ -78,8 +78,8 @@ flowchart TD
 
     OA --> OWL[("Ontology/*.owl")]
     DIA --> SQLW
-    META --> SQLW
-    MA --> AOAI
+    META --> UC & SQLW
+    MA & OA & DIA & META --> AOAI
     API -.->|exported logs, when configured externally| AIF
 ```
 
