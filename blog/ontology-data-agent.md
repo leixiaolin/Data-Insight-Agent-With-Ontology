@@ -8,7 +8,7 @@ https://mp.weixin.qq.com/s/KchHHsrCno22h_Hp9hZJSg
 
 > 本文中涉及的源码请查看：
 
-
+https://github.com/tianputao/Data-Insight-Agent-With-Ontology/tree/main
 
 ## 1. 引言：为什么要给 Data Agent (text-to-sql) 加一层 Ontology
 
@@ -412,4 +412,10 @@ OWL Ontology 作为自然语言与物理 schema 之间的业务语义中间层�
 
 ## 附录
 
-> 待补充：GitHub 仓库地址、前序文章链接、相关参考文档等。
+GitHub 仓库地址：https://github.com/tianputao/Data-Insight-Agent-With-Ontology/tree/main
+前序文章链接:
+
+参考文档:
+     Protégé 文档：https://protegewiki.stanford.edu/wiki/Main_Page
+     OWL     文档：https://www.w3.org/TR/owl-primer/?utm_source=chatgpt.com
+     Owlready2  ：https://github.com/pwin/owlready2
