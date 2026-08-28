@@ -248,6 +248,35 @@ The application does not currently register an Azure AI Foundry or Application I
 - Groundedness, relevance, coherence metrics
 - A/B testing: ontology enrichment on/off
 
+## 🗺️ Product Backlog
+
+This backlog records planned work only; none of the items below should be treated as implemented. GitHub Issues are the execution record, while this section remains the public roadmap summary.
+
+Status: `Planned` · `Ready` · `In progress` · `Blocked` · `Done`
+
+| ID | Priority | Status | Backlog item | Definition of done | Depends on |
+|---|---|---|---|---|---|
+| [`ODA-001`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/1) | P0 | Planned | **Authentication and tenant isolation** | Add user login, backend token validation, user/tenant ownership checks for every session and run, role-based access to governed SQL, and authorization tests proving one user cannot read, stop, or delete another user's work. | — |
+| [`ODA-002`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/2) | P0 | Planned | **Durable sessions and multi-worker readiness** | Move MasterAgent session metadata, conversation history, response cache, and active-run state out of process-local dictionaries; support multiple workers or pods without losing routing, history, or stop requests. | `ODA-001` |
+| [`ODA-003`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/3) | P0 | Planned | **Per-question run tracking and trace UI** | Assign every question an immutable `run_id`; persist its route, ontology mode, agent stages, tool calls, sanitized inputs/outputs, SQL/query ID, timings, result status, and errors; add a dedicated UI tab for inspecting each run. | `ODA-001`, `ODA-002` |
+| [`ODA-004`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/4) | P0 | Planned | **End-to-end observability** | Add OpenTelemetry-compatible traces, metrics, and structured logs across API, MasterAgent, child agents, tools, Azure OpenAI, and Databricks; correlate all telemetry by `run_id`, `thread_id`, and user/tenant while redacting secrets and sensitive data. | `ODA-003` |
+| [`ODA-005`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/5) | P0 | Planned | **Code-enforced run safety and cancellation** | Enforce at most one `delegate_data_analysis` call per turn in code, make client disconnect set the cancellation event, propagate cancellation to child tasks and Databricks statements, and make retryable operations idempotent. | `ODA-002`, `ODA-003` |
+| [`ODA-006`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/6) | P1 | Planned | **User-configured governed question + SQL** | Provide an authenticated UI/API for users to create, test, version, enable, and retire question-to-SQL rules; validate read-only, allowlisted, fully qualified SQL; record ownership and audit history; route matched rules through a governed contract rather than executing arbitrary text directly. | `ODA-001`, `ODA-002`, `ODA-003` |
+| [`ODA-007`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/7) | P1 | Planned | **Chart generation for suitable answers** | Return a typed visualization specification alongside tabular results when a chart is useful; render supported chart types in the UI with accessible table fallback, preserve units/labels, and avoid inventing dimensions or series absent from the SQL result. | `ODA-003` |
+| [`ODA-008`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/8) | P1 | Planned | **User-scoped persistent memory** | Persist user-approved preferences, business terminology, recurring analysis settings, and compact conversation summaries; isolate memory by user/tenant, expose inspect/edit/delete controls, track provenance, and never treat memory as verified Unity Catalog or ontology evidence. | `ODA-001`, `ODA-002` |
+| [`ODA-009`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/9) | P1 | Planned | **Reliable multi-turn answer continuity** | Make follow-up questions reliably reference prior DataInsight results by storing a bounded structured result summary in MasterAgent-visible history; keep cached responses and the MAF session consistent instead of allowing their histories to diverge. | `ODA-002`, `ODA-003` |
+| [`ODA-010`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/10) | P1 | Planned | **Bounded inter-agent evidence contracts** | Version and validate the Ontology→Metadata→DataInsight payload schemas, apply configurable token/character budgets, preserve provenance for retained evidence, and explicitly report lossy pruning. | `ODA-003` |
+| [`ODA-011`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/11) | P2 | Planned | **Concurrent Databricks execution** | Replace the process-wide SQL connection and global execution lock with bounded connection pooling or request-scoped connections; preserve query cancellation, timeout, retry, and per-user limits under concurrency. | `ODA-001`, `ODA-004` |
+| [`ODA-012`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/12) | P2 | Planned | **Durable cross-process run recovery** | Checkpoint completed pipeline stages so another worker can safely resume an interrupted run without repeating completed ontology/metadata work or duplicating side effects; use leases and idempotency keys to prevent double recovery. | `ODA-002`, `ODA-003`, `ODA-005` |
+
+### Backlog Guardrails
+
+- OWL remains authoritative for formal business semantics; Unity Catalog remains authoritative for physical tables, columns, types, and permissions.
+- User-configured SQL must pass the same read-only and catalog/schema enforcement as model-generated SQL, with stricter ownership and approval controls where required.
+- Tracking, observability, and memory must redact credentials, tokens, sensitive rows, and unapproved model reasoning before persistence.
+- Persistent memory is advisory context, not an automatic source of truth, and users must be able to review and delete it.
+- Chart specifications must be derived from executed result data and must always retain a readable tabular fallback.
+
 ## ✅ Validation
 
 ```bash
