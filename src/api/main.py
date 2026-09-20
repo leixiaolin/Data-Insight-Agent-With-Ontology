@@ -59,8 +59,9 @@ from src.agents import (
     OntologyAgent,
 )
 from src.ontology import OntologyService
-from src.config import AppConfig
+from src.config import AppConfig, DataSourceConfig
 from src.business_layer import load_business_layer, save_business_layer
+from src.data_sources import get_active_data_source
 from src.utils import get_logger
 from src.utils.activity import (
     delegated_agent,
@@ -767,6 +768,21 @@ def _append_history(
 
 # ─── Routes ────────────────────────────────────────────────────────────────────
 
+def _public_data_source_health() -> Dict[str, Any]:
+    """Non-sensitive active data source summary for /health and /config."""
+    source = get_active_data_source()
+    rules = source.scope_rules()
+    return {
+        "type": DataSourceConfig.TYPE,
+        "name": source.name,
+        "dialect": rules.sqlglot_dialect,
+        "display_name": rules.display_name,
+        "databases_or_schemas": rules.schemas,
+        "naming": rules.naming_example,
+        "configured": source.is_configured(),
+    }
+
+
 @app.get("/health")
 async def health_check():
     """Return service health and agent status."""
@@ -776,6 +792,7 @@ async def health_check():
         "init_error": state.init_error,
         "active_threads": len(state.threads),
         "ontology": _public_ontology_health(),
+        "data_source": _public_data_source_health(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -786,6 +803,7 @@ async def get_runtime_config():
     return {
         "default_enable_ontology": AppConfig.DEFAULT_ENABLE_ONTOLOGY,
         "ontology": _public_ontology_health(),
+        "data_source": _public_data_source_health(),
     }
 
 

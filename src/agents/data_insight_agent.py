@@ -25,14 +25,23 @@ from datetime import date, datetime, time as _time
 from decimal import Decimal
 import json
 import re
-import threading
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Any, List, Optional
 
 from pydantic import Field
 from sqlglot import exp, parse
 from sqlglot.errors import ParseError
 
-from ..config import AgentReasoningConfig, DatabricksConfig, OntologyConfig
+from ..config import (
+    AgentReasoningConfig,
+    DatabricksConfig,
+    DataSourcePolicyConfig,
+    OntologyConfig,
+)
+from ..data_sources import (
+    build_identity_block,
+    get_active_data_source,
+    get_scope_rules,
+)
 from ..prompts import DATA_INSIGHT_AGENT_PROMPT
 from ..skills_provider import (
     begin_skill_usage_tracking,
@@ -51,67 +60,25 @@ from .maf_runtime import (
 
 logger = get_logger(__name__)
 
-# ─── Databricks connection singleton (avoids per-query cold-start) ────────────
-# Performance note: the biggest latency contributors are:
-#   1. Databricks warehouse cold-start (first connect ~3-10 s, warm ~<1 s)
-#   2. Ontology routing and MetadataAgent verification model turns
-#   3. DataInsightAgent SQL generation and result interpretation
-# Reusing the SQL connector connection eliminates the cold-start penalty for subsequent queries.
-_db_connection: Optional[Any] = None
-# Re-entrant so a query can hold it across acquisition and execution.
-_db_lock = threading.RLock()
-
 
 def _validate_sql_scope(sql: str) -> Optional[str]:
-    """Return a blocking error when SQL references an unexposed UC object."""
-    try:
-        statements = [statement for statement in parse(sql, read="databricks") if statement]
-    except ParseError as exc:
-        return f"BLOCKED: SQL could not be parsed for catalog/schema validation: {exc}"
-    if len(statements) != 1:
-        return "BLOCKED: Exactly one SQL statement is permitted."
+    """Delegate read-only scope validation to the active data source's dialect rules."""
+    from ..data_sources import get_scope_rules
+    from ..data_sources.scope import validate_sql_scope
 
-    statement = statements[0]
-    cte_names = {
-        cte.alias_or_name.casefold()
-        for cte in statement.find_all(exp.CTE)
-        if cte.alias_or_name
-    }
-    configured_catalog = DatabricksConfig.CATALOG
-    configured_schemas = {
-        schema.casefold(): schema for schema in DatabricksConfig.SCHEMAS
-    }
-
-    for table in statement.find_all(exp.Table):
-        table_name = table.name
-        if (
-            not table.catalog
-            and not table.db
-            and table_name.casefold() in cte_names
-        ):
-            continue
-        if not table.catalog or not table.db:
-            return (
-                f"BLOCKED: Physical table '{table.sql(dialect='databricks')}' must use a "
-                "fully-qualified configured catalog.schema.table name."
-            )
-        if table.catalog.casefold() != configured_catalog.casefold():
-            return (
-                f"BLOCKED: Catalog '{table.catalog}' is outside the configured catalog "
-                f"'{configured_catalog}'."
-            )
-        if table.db.casefold() not in configured_schemas:
-            return (
-                f"BLOCKED: Schema '{table.db}' is outside DATABRICKS_SCHEMAS "
-                f"({', '.join(DatabricksConfig.SCHEMAS)})."
-            )
-    return None
+    return validate_sql_scope(sql, get_scope_rules())
 
 
 def _extract_sql_measures(sql: str) -> dict[str, Any]:
     """Report what a query actually aggregated, grouped, and filtered, straight from its AST."""
     try:
-        statements = [statement for statement in parse(sql, read="databricks") if statement]
+        statements = [
+            statement
+            for statement in parse(
+                sql, read=get_scope_rules().sqlglot_dialect
+            )
+            if statement
+        ]
     except ParseError:
         return {}
     if not statements:
@@ -358,52 +325,8 @@ class _RecoveryState:
     pending_diagnostic: Optional[dict[str, Any]] = None
 
 
-def _get_db_connection():
-    """Return a reusable Databricks SQL connection, creating one if needed."""
-    global _db_connection
-
-    if not DatabricksConfig.is_configured():
-        raise RuntimeError(
-            "Databricks connection is not configured. "
-            "Set DATABRICKS_HOST, DATABRICKS_TOKEN, and DATABRICKS_HTTP_PATH in .env."
-        )
-
-    try:
-        from databricks import sql as dbsql
-    except ImportError as exc:
-        raise RuntimeError(
-            "databricks-sql-connector is not installed. "
-            "Run: pip install databricks-sql-connector"
-        ) from exc
-
-    with _db_lock:
-        # Test existing connection with a lightweight ping
-        if _db_connection is not None:
-            try:
-                cur = _db_connection.cursor()
-                cur.execute("SELECT 1")
-                cur.close()
-                return _db_connection
-            except Exception:
-                logger.warning("Stale Databricks connection, reconnecting…")
-                try:
-                    _db_connection.close()
-                except Exception:
-                    pass
-                _db_connection = None
-
-        logger.info("Opening new Databricks SQL connection…")
-        _db_connection = dbsql.connect(
-            server_hostname=DatabricksConfig.HOST.replace("https://", ""),
-            http_path=DatabricksConfig.HTTP_PATH,
-            access_token=DatabricksConfig.TOKEN,
-            _socket_timeout=DatabricksConfig.QUERY_TIMEOUT,
-        )
-        return _db_connection
-
-
 def _json_default(value: Any) -> str:
-    """Databricks returns date, datetime and Decimal objects that `json` cannot encode."""
+    """Backends return date, datetime and Decimal objects that `json` cannot encode."""
     if isinstance(value, (date, datetime, _time)):
         return value.isoformat()
     if isinstance(value, Decimal):
@@ -411,46 +334,6 @@ def _json_default(value: Any) -> str:
     if isinstance(value, (bytes, bytearray)):
         return value.decode("utf-8", errors="replace")
     return str(value)
-
-
-def _is_connection_level_error(exc: BaseException) -> bool:
-    """A server-side SQL error leaves the connection usable; anything else may not."""
-    try:
-        from databricks.sql import exc as dbsql_exc
-    except ImportError:
-        return True
-    return not isinstance(exc, dbsql_exc.ServerOperationError)
-
-
-def _run_databricks_query(sql: str, max_rows: int = 500) -> Dict[str, Any]:
-    """
-    Execute *sql* against the configured Databricks SQL warehouse.
-    Reuses a persistent connection to avoid per-call cold-start latency.
-    """
-    global _db_connection
-
-    # One process-wide connection is shared by every session thread, and a DB-API
-    # connection is not safe for concurrent cursors, so queries run one at a time.
-    with _db_lock:
-        connection = _get_db_connection()
-        cursor = None
-        try:
-            cursor = connection.cursor()
-            cursor.execute(sql)
-            raw_rows = cursor.fetchmany(max_rows)
-            columns = [desc[0] for desc in (cursor.description or [])]
-            rows = [list(row) for row in raw_rows]
-            return {"columns": columns, "rows": rows, "row_count": len(rows), "sql": sql}
-        except Exception as exc:
-            if _is_connection_level_error(exc):
-                _db_connection = None
-            raise
-        finally:
-            if cursor is not None:
-                try:
-                    cursor.close()
-                except Exception:
-                    pass
 
 
 class DataInsightAgent:
@@ -964,7 +847,8 @@ class DataInsightAgent:
             if scope_error:
                 return scope_error
 
-            max_rows = min(max(1, max_rows), DatabricksConfig.MAX_ROWS)
+            max_rows = min(max(1, max_rows), DataSourcePolicyConfig.MAX_ROWS)
+            active_source = get_active_data_source()
 
             def _rewrite_invalid_qualify(original_sql: str) -> Optional[str]:
                 """
@@ -1012,10 +896,17 @@ class DataInsightAgent:
                         )
                 try:
                     executed_sql = active_sql
-                    result = _run_databricks_query(active_sql, max_rows=max_rows)
+                    result = active_source.execute_query(
+                        active_sql, max_rows=max_rows
+                    )
                 except Exception as first_exc:
                     msg = str(first_exc)
-                    if "Cannot resolve QUALIFY" in msg and "aggregate functions" in msg and "QUALIFY" in active_sql.upper():
+                    if (
+                        active_source.name == "databricks"
+                        and "Cannot resolve QUALIFY" in msg
+                        and "aggregate functions" in msg
+                        and "QUALIFY" in active_sql.upper()
+                    ):
                         rewritten = _rewrite_invalid_qualify(active_sql)
                         if rewritten:
                             logger.warning(
@@ -1023,15 +914,17 @@ class DataInsightAgent:
                             )
                             logger.info(f"[Tool:execute_sql] Rewritten SQL:\n{rewritten}")
                             executed_sql = rewritten
-                            result = _run_databricks_query(rewritten, max_rows=max_rows)
+                            result = active_source.execute_query(
+                                rewritten, max_rows=max_rows
+                            )
                         else:
                             raise
                     else:
                         raise
 
-                columns = result["columns"]
-                rows = result["rows"]
-                row_count = result["row_count"]
+                columns = result.columns
+                rows = result.rows
+                row_count = result.row_count
                 diagnostics = _profile_query_result(
                     [str(column) for column in columns],
                     rows,
@@ -1126,18 +1019,9 @@ class DataInsightAgent:
     def _create_agent(self, tools: List):
         """Initialise the MAF DataInsightAgent."""
         enriched_prompt = DATA_INSIGHT_AGENT_PROMPT
-        # Add Databricks config context (list all available schemas)
-        schemas_list = ", ".join(f"`{s}`" for s in DatabricksConfig.SCHEMAS)
-        db_context = (
-            f"\n\n## Databricks Context\n"
-            f"- Catalog: `{DatabricksConfig.CATALOG}`\n"
-            f"- Available schemas: {schemas_list}\n"
-            f"- Default schema (when unspecified): `{DatabricksConfig.SCHEMA}`\n"
-            f"- Always use fully-qualified names: `{DatabricksConfig.CATALOG}.<schema>.<table>`\n"
-            f"- Max rows per query: {DatabricksConfig.MAX_ROWS}\n"
-            f"- Configured: {DatabricksConfig.is_configured()}\n"
-        )
-        enriched_prompt += db_context
+        # Runtime identity block (source type, allowlist, naming, dialect).
+        # Byte-identical to the previous hardcoded block for the databricks source.
+        enriched_prompt += build_identity_block("data_insight")
 
         skills_provider = create_skills_provider("DataInsightAgent")
         agent = create_maf_agent(

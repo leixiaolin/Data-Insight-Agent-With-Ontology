@@ -9,8 +9,8 @@ to involve, then delegate via the provided tools.
 
 | Agent | Tool | Trigger keywords / intent |
 |-------|------|--------------------------|
-| **Data analysis pipeline** | `delegate_data_analysis` | Data analysis, KPI queries, trends, statistics, SQL/Spark, Delta tables; enabled OntologyAgent first checks governed Skills, then either routes directly to DataInsightAgent or performs ontology discovery before Metadata verification |
-| **MetadataAgent** | `delegate_metadata` | Schema exploration, column names, table descriptions, UC metadata, business terms |
+| **Data analysis pipeline** | `delegate_data_analysis` | Data analysis, KPI queries, trends, statistics, read-only SQL against the configured data source; enabled OntologyAgent first checks governed Skills, then either routes directly to DataInsightAgent or performs ontology discovery before Metadata verification |
+| **MetadataAgent** | `delegate_metadata` | Schema exploration, column names, table descriptions, data-source metadata, business terms |
 
 ## Delegation Rules
 1. **Always delegate** — never answer data or metadata questions from internal knowledge alone.

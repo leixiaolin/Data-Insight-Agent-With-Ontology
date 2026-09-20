@@ -28,7 +28,13 @@ from typing import Annotated, Any, Dict, List, Optional
 
 from pydantic import Field
 
-from ..config import AgentReasoningConfig, AzureOpenAIConfig, DatabricksConfig
+from ..config import (
+    AgentReasoningConfig,
+    AzureOpenAIConfig,
+    DatabricksConfig,
+    DataSourcePolicyConfig,
+)
+from ..data_sources import build_identity_block, get_scope_rules
 from ..metadata_catalog import MetadataCatalogService
 from ..prompts import METADATA_AGENT_PROMPT
 from ..skills_provider import create_skills_provider
@@ -72,31 +78,6 @@ def _compact_hits(terms: set[str], compact: str) -> int:
     return sum(
         1 for term in terms if len(term) >= _COMPACT_TERM_MIN and term in compact
     )
-
-
-def _sql_connector_query_metadata(sql: str) -> List[Dict[str, Any]]:
-    """Execute a metadata query through the Databricks SQL connector."""
-    if not DatabricksConfig.is_configured():
-        raise RuntimeError("Databricks connection not configured.")
-    try:
-        from databricks import sql as dbsql
-    except ImportError as exc:
-        raise RuntimeError("databricks-sql-connector not installed.") from exc
-
-    connection = dbsql.connect(
-        server_hostname=DatabricksConfig.HOST.replace("https://", ""),
-        http_path=DatabricksConfig.HTTP_PATH,
-        access_token=DatabricksConfig.TOKEN,
-        _socket_timeout=DatabricksConfig.QUERY_TIMEOUT,
-    )
-    try:
-        cursor = connection.cursor()
-        cursor.execute(sql)
-        columns = [d[0] for d in (cursor.description or [])]
-        rows = cursor.fetchall()
-        return [dict(zip(columns, row)) for row in rows]
-    finally:
-        connection.close()
 
 
 # ─── MetadataAgent ─────────────────────────────────────────────────────────────
@@ -155,8 +136,9 @@ class MetadataAgent:
 
     def _create_tools(self) -> List:
 
-        configured_catalog = DatabricksConfig.CATALOG
-        configured_schemas = tuple(DatabricksConfig.SCHEMAS)
+        rules = get_scope_rules()
+        configured_catalog = rules.catalog
+        configured_schemas = tuple(rules.schemas)
         schema_lookup = {
             configured_schema.casefold(): configured_schema
             for configured_schema in configured_schemas
@@ -165,17 +147,26 @@ class MetadataAgent:
         def validate_catalog(catalog: str) -> tuple[Optional[str], Optional[dict[str, Any]]]:
             requested_catalog = (catalog or configured_catalog).strip()
             if requested_catalog.casefold() != configured_catalog.casefold():
+                if rules.require_catalog:
+                    error = (
+                        "Catalog is not exposed by the runtime Databricks configuration."
+                    )
+                else:
+                    error = (
+                        "MySQL has no catalog layer; leave catalog empty and use "
+                        "database names from the allowlist instead."
+                    )
                 return None, {
                     "status": "out_of_scope",
                     "requested_catalog": requested_catalog,
                     "configured_catalog": configured_catalog,
                     "configured_schemas": list(configured_schemas),
-                    "error": "Catalog is not exposed by the runtime Databricks configuration.",
+                    "error": error,
                 }
             return configured_catalog, None
 
         def validate_schema(schema: str) -> tuple[Optional[str], Optional[dict[str, Any]]]:
-            requested_schema = (schema or DatabricksConfig.SCHEMA).strip()
+            requested_schema = (schema or rules.default_schema).strip()
             configured_schema = schema_lookup.get(requested_schema.casefold())
             if configured_schema is None:
                 return None, {
@@ -183,7 +174,11 @@ class MetadataAgent:
                     "requested_schema": requested_schema,
                     "configured_catalog": configured_catalog,
                     "configured_schemas": list(configured_schemas),
-                    "error": "Schema is not exposed by DATABRICKS_SCHEMAS.",
+                    "error": (
+                        "Schema is not exposed by DATABRICKS_SCHEMAS."
+                        if rules.require_catalog
+                        else "Database is not exposed by MYSQL_DATABASES."
+                    ),
                 }
             return configured_schema, None
 
@@ -232,33 +227,12 @@ class MetadataAgent:
                     result,
                 )
             except Exception as exc:
-                logger.warning(
-                    "[Tool:list_schemas] SDK failed, using SQL connector fallback: %s",
-                    exc,
-                )
-                try:
-                    rows = _sql_connector_query_metadata(f"SHOW SCHEMAS IN `{catalog}`")
-                    visible_rows = [
-                        row
-                        for row in rows
-                        if str(row[0] if isinstance(row, (list, tuple)) else row).casefold()
-                        in schema_lookup
-                    ]
-                    result = {
-                        "status": "ok",
-                        "catalog": catalog,
-                        "schemas": visible_rows,
-                        "configured_schemas": list(configured_schemas),
-                        "count": len(visible_rows),
-                        "source": "sql_connector_fallback",
-                        "cache_hit": False,
-                    }
-                except Exception as fallback_exc:
-                    result = {
-                        "status": "error",
-                        "catalog": catalog,
-                        "error": str(fallback_exc),
-                    }
+                # The provider already attempted its backend-specific recovery path.
+                result = {
+                    "status": "error",
+                    "catalog": catalog,
+                    "error": str(exc),
+                }
                 return self._tool_json(
                     "list_schemas",
                     {"catalog": catalog},
@@ -330,26 +304,15 @@ class MetadataAgent:
                     }
                     total_count += len(table_info)
                 except Exception as exc:
+                    # The provider already attempted its backend-specific recovery path.
                     logger.warning(
-                        "[Tool:list_tables] SDK failed for %s, SQL connector fallback: %s",
+                        "[Tool:list_tables] metadata fetch failed for %s: %s",
                         sch,
                         exc,
                     )
-                    try:
-                        rows = _sql_connector_query_metadata(
-                            f"SHOW TABLES IN `{catalog}`.`{sch}`"
-                        )
-                        all_results["schemas"][sch] = {
-                            "tables": rows,
-                            "count": len(rows),
-                            "source": "sql_connector_fallback",
-                            "cache_hit": False,
-                        }
-                        total_count += len(rows)
-                    except Exception as fallback_exc:
-                        all_results["schemas"][sch] = {
-                            "error": str(fallback_exc)
-                        }
+                    all_results["schemas"][sch] = {
+                        "error": str(exc)
+                    }
 
             all_results["status"] = "ok" if total_count else "partial"
             all_results["total_count"] = total_count
@@ -374,12 +337,16 @@ class MetadataAgent:
             requested_catalog = catalog
             requested_schema = schema
 
-            # Normalise table name to three-part
+            # Normalise table name to the active source's qualified form
             parts = table_name.split(".")
-            if len(parts) == 3:
-                requested_catalog, requested_schema, table_name = parts
-            elif len(parts) == 2:
-                requested_schema, table_name = parts
+            if rules.qualified_parts == 3:
+                if len(parts) == 3:
+                    requested_catalog, requested_schema, table_name = parts
+                elif len(parts) == 2:
+                    requested_schema, table_name = parts
+            else:
+                if len(parts) == 2:
+                    requested_schema, table_name = parts
             # else: bare name, use defaults above
 
             catalog, catalog_error = validate_catalog(requested_catalog)
@@ -406,7 +373,10 @@ class MetadataAgent:
                 )
             assert catalog is not None and schema is not None
 
-            full_name = f"{catalog}.{schema}.{table_name}"
+            if rules.qualified_parts == 3:
+                full_name = f"{catalog}.{schema}.{table_name}"
+            else:
+                full_name = f"{schema}.{table_name}"
             logger.info(f"[Tool:get_table_details] full_name='{full_name}'")
 
             try:
@@ -430,27 +400,16 @@ class MetadataAgent:
                         "cache_hit": cache_hit,
                     }
             except Exception as exc:
+                # The provider already attempted its backend-specific recovery path.
                 logger.warning(
-                    "[Tool:get_table_details] SDK failed, SQL connector fallback: %s",
+                    "[Tool:get_table_details] metadata fetch failed: %s",
                     exc,
                 )
-                try:
-                    rows = _sql_connector_query_metadata(
-                        f"DESCRIBE TABLE EXTENDED `{catalog}`.`{schema}`.`{table_name}`"
-                    )
-                    result = {
-                        "status": "ok",
-                        "full_name": full_name,
-                        "describe": rows,
-                        "source": "sql_connector_fallback",
-                        "cache_hit": False,
-                    }
-                except Exception as fallback_exc:
-                    result = {
-                        "status": "error",
-                        "full_name": full_name,
-                        "error": str(fallback_exc),
-                    }
+                result = {
+                    "status": "error",
+                    "full_name": full_name,
+                    "error": str(exc),
+                }
             return self._tool_json(
                 "get_table_details",
                 {
@@ -563,16 +522,9 @@ class MetadataAgent:
     ):
         """Initialise the MAF MetadataAgent."""
         enriched_prompt = METADATA_AGENT_PROMPT
-        db_context = (
-            f"\n\n## Databricks Context\n"
-            f"- Default catalog: `{DatabricksConfig.CATALOG}`\n"
-            f"- Default schema: `{DatabricksConfig.SCHEMA}`\n"
-            f"- Exposed schemas (authoritative allowlist): "
-            f"{', '.join(f'`{schema}`' for schema in DatabricksConfig.SCHEMAS)}\n"
-            f"- Never request or describe a catalog/schema outside this allowlist.\n"
-            f"- Configured: {DatabricksConfig.is_configured()}\n"
-        )
-        enriched_prompt += db_context
+        # Runtime identity block (source type, allowlist, naming, dialect).
+        # Byte-identical to the previous hardcoded block for the databricks source.
+        enriched_prompt += build_identity_block("metadata")
 
         skills_provider = (
             create_skills_provider("MetadataAgent") if enable_skills else None
@@ -831,7 +783,7 @@ class MetadataAgent:
             "origin": "deterministic",
             "arguments": {
                 "table_name": table.get("name"),
-                "catalog": DatabricksConfig.CATALOG,
+                "catalog": get_scope_rules().catalog,
                 "schema": table.get("schema"),
             },
             "result": {
@@ -859,10 +811,11 @@ class MetadataAgent:
 
     def _index_summaries(self) -> list[dict[str, Any]]:
         """List every allowlisted table once; no column is fetched here."""
+        rules = get_scope_rules()
         summaries: list[dict[str, Any]] = []
-        for schema in DatabricksConfig.SCHEMAS:
+        for schema in rules.schemas:
             tables, _ = self.catalog_service.list_tables(
-                catalog=DatabricksConfig.CATALOG,
+                catalog=rules.catalog,
                 schema=schema,
             )
             summaries.extend(tables)
@@ -1058,8 +1011,8 @@ class MetadataAgent:
                 "tool": "list_tables",
                 "origin": "deterministic",
                 "arguments": {
-                    "catalog": DatabricksConfig.CATALOG,
-                    "schema": ", ".join(DatabricksConfig.SCHEMAS),
+                    "catalog": get_scope_rules().catalog,
+                    "schema": ", ".join(get_scope_rules().schemas),
                 },
                 "result": {
                     "status": "ok",

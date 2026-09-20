@@ -22,7 +22,12 @@ python-dotenv>=1.0.0
 # ── Azure Databricks ─────────────────────────────────────────────────────────
 databricks-sql-connector>=3.0.0    # Python DB-API/Thrift SQL execution against Databricks warehouse
 databricks-sdk>=0.20.0             # Unity Catalog REST API (table/schema metadata)
-sqlglot>=30.13.0,<31.0.0           # Parse Databricks SQL for catalog/schema scope enforcement
+sqlglot>=30.13.0,<31.0.0           # Parse Databricks/MySQL SQL for scope enforcement
+
+# ── MySQL data source (DATA_SOURCE_TYPE=mysql) ────────────────────────────────
+SQLAlchemy>=2.0                    # Core engine + connection pool (no ORM usage)
+PyMySQL>=1.1.0                     # DB-API driver behind the SQLAlchemy engine
+cryptography>=42.0.0               # MySQL 8 default caching_sha2_password auth
 
 # ── Data Processing ───────────────────────────────────────────────────────────
 numpy>=1.24.0
@@ -38,5 +43,6 @@ typing-extensions>=4.9.0
 # ── Development and Test Tools (installed by this requirements file) ─────────
 pytest>=7.4.0
 pytest-asyncio>=0.21.0
+testcontainers[mysql]>=4.0.0       # Real throwaway MySQL container for integration tests
 black>=23.12.0
 flake8>=7.0.0

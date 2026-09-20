@@ -5,6 +5,9 @@ from .settings import (
     AzureOpenAIConfig,
     AzureAIFoundryConfig,
     DatabricksConfig,
+    DataSourceConfig,
+    DataSourcePolicyConfig,
+    MySQLConfig,
     OntologyConfig,
     AppConfig,
     validate_config
@@ -15,6 +18,9 @@ __all__ = [
     'AzureOpenAIConfig',
     'AzureAIFoundryConfig',
     'DatabricksConfig',
+    'DataSourceConfig',
+    'DataSourcePolicyConfig',
+    'MySQLConfig',
     'OntologyConfig',
     'AppConfig',
     'validate_config'

@@ -1,100 +1,114 @@
-"""On-demand Unity Catalog metadata cache tests."""
+"""On-demand metadata cache tests over an injected fake MetadataProvider."""
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from typing import Any, Optional
 
 from src.metadata_catalog import MetadataCatalogService
 
 
-def _column(name: str, type_name: str = "STRING") -> SimpleNamespace:
-    return SimpleNamespace(
-        name=name,
-        type_name=type_name,
-        nullable=True,
-        comment="",
-        tags=None,
-    )
+def _column(name: str, type_name: str = "STRING") -> dict[str, Any]:
+    return {"name": name, "type": type_name, "nullable": True, "comment": ""}
 
 
 class _TablesApi:
+    """Fake MetadataProvider speaking the final payload shapes."""
+
     def __init__(self) -> None:
         self.list_calls: list[tuple[str, str]] = []
         self.get_calls: list[str] = []
         self.summaries = [
-            SimpleNamespace(
-                name="salesorderdetail",
-                full_name="catalog.silver.salesorderdetail",
-                table_type="MANAGED",
-                comment="Sales order line quantities",
-            ),
-            SimpleNamespace(
-                name="salesproduct",
-                full_name="catalog.silver.salesproduct",
-                table_type="MANAGED",
-                comment="Products",
-            ),
-            SimpleNamespace(
-                name="salesproductcategory",
-                full_name="catalog.silver.salesproductcategory",
-                table_type="MANAGED",
-                comment="Product categories",
-            ),
+            {
+                "name": "salesorderdetail",
+                "full_name": "catalog.silver.salesorderdetail",
+                "schema": "silver",
+                "table_type": "MANAGED",
+                "comment": "Sales order line quantities",
+            },
+            {
+                "name": "salesproduct",
+                "full_name": "catalog.silver.salesproduct",
+                "schema": "silver",
+                "table_type": "MANAGED",
+                "comment": "Products",
+            },
+            {
+                "name": "salesproductcategory",
+                "full_name": "catalog.silver.salesproductcategory",
+                "schema": "silver",
+                "table_type": "MANAGED",
+                "comment": "Product categories",
+            },
         ]
         self.details = {
-            "catalog.silver.salesorderdetail": SimpleNamespace(
-                table_type="MANAGED",
-                comment="Sales order line quantities",
-                owner="owner",
-                tags=None,
-                columns=[
+            "catalog.silver.salesorderdetail": {
+                "name": "salesorderdetail",
+                "full_name": "catalog.silver.salesorderdetail",
+                "schema": "silver",
+                "table_type": "MANAGED",
+                "comment": "Sales order line quantities",
+                "owner": "owner",
+                "columns": [
                     _column("SalesOrderID", "INT"),
                     _column("ProductID", "INT"),
                     _column("OrderQty", "INT"),
                 ],
-            ),
-            "catalog.silver.salesproduct": SimpleNamespace(
-                table_type="MANAGED",
-                comment="Products",
-                owner="owner",
-                tags=None,
-                columns=[
+            },
+            "catalog.silver.salesproduct": {
+                "name": "salesproduct",
+                "full_name": "catalog.silver.salesproduct",
+                "schema": "silver",
+                "table_type": "MANAGED",
+                "comment": "Products",
+                "owner": "owner",
+                "columns": [
                     _column("ProductID", "INT"),
                     _column("Name"),
                     _column("ProductNumber"),
                     _column("ProductCategoryID", "INT"),
                 ],
-            ),
-            "catalog.silver.salesproductcategory": SimpleNamespace(
-                table_type="MANAGED",
-                comment="Product categories",
-                owner="owner",
-                tags=None,
-                columns=[
+            },
+            "catalog.silver.salesproductcategory": {
+                "name": "salesproductcategory",
+                "full_name": "catalog.silver.salesproductcategory",
+                "schema": "silver",
+                "table_type": "MANAGED",
+                "comment": "Product categories",
+                "owner": "owner",
+                "columns": [
                     _column("ProductCategoryID", "INT"),
                     _column("ParentProductCategoryID", "INT"),
                     _column("Name"),
                 ],
-            ),
+            },
         }
 
-    def list(self, *, catalog_name: str, schema_name: str):
-        self.list_calls.append((catalog_name, schema_name))
-        return list(self.summaries)
+    def list_schemas(self, *, catalog: str = "") -> list[str]:
+        return []
 
-    def get(self, *, full_name: str):
+    def list_tables(
+        self, *, schema: str, catalog: str = ""
+    ) -> list[dict[str, Any]]:
+        self.list_calls.append((catalog, schema))
+        return [dict(summary) for summary in self.summaries]
+
+    def get_table(
+        self, *, catalog: str, schema: str, table: str
+    ) -> Optional[dict[str, Any]]:
+        full_name = f"{catalog}.{schema}.{table}"
         self.get_calls.append(full_name)
-        return self.details[full_name]
+        detail = self.details.get(full_name)
+        if detail is None:
+            return None
+        return {
+            **detail,
+            "columns": [dict(column) for column in detail["columns"]],
+        }
 
 
 def _service_with_client() -> tuple[MetadataCatalogService, _TablesApi]:
     tables_api = _TablesApi()
-    client = SimpleNamespace(
-        tables=tables_api,
-        schemas=SimpleNamespace(list=lambda **_: []),
-    )
-    service = MetadataCatalogService(ttl_seconds=900)
-    service._workspace_client = lambda: client
+    service = MetadataCatalogService(ttl_seconds=900, provider=tables_api)
     return service, tables_api
 
 
@@ -145,12 +159,13 @@ def test_search_uses_cached_summaries_until_explicit_refresh() -> None:
     service, tables_api = _service_with_client()
     service.list_tables(catalog="catalog", schema="silver")
     tables_api.summaries.append(
-        SimpleNamespace(
-            name="inventorymovement",
-            full_name="catalog.silver.inventorymovement",
-            table_type="MANAGED",
-            comment="Warehouse inventory movement facts",
-        )
+        {
+            "name": "inventorymovement",
+            "full_name": "catalog.silver.inventorymovement",
+            "schema": "silver",
+            "table_type": "MANAGED",
+            "comment": "Warehouse inventory movement facts",
+        }
     )
 
     stale_matches, cache_hit = service.search_tables(

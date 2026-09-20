@@ -60,8 +60,13 @@ class AgentReasoningConfig:
 
 class AzureAIFoundryConfig:
     """Azure AI Foundry configuration for monitoring and evaluation."""
-    
+
     CONNECTION_STRING = os.getenv('AZURE_AI_PROJECT_CONNECTION_STRING')
+
+
+def _policy_int(generic_name: str, legacy_name: str, default: str) -> int:
+    """Read a source-agnostic policy value: DATA_* first, legacy DATABRICKS_* second."""
+    return int(os.getenv(generic_name, os.getenv(legacy_name, default)))
 
 
 class DatabricksConfig:
@@ -81,16 +86,21 @@ class DatabricksConfig:
     SCHEMAS = [s.strip() for s in _schemas_raw.split(',') if s.strip()] or ['default']
     SCHEMA = SCHEMAS[0]  # primary / default schema (backward-compatible)
     
-    # Maximum rows returned for data insight queries
-    MAX_ROWS = int(os.getenv('DATABRICKS_MAX_ROWS', '500'))
-    
+    # Maximum rows returned for data insight queries.
+    # Dual-track alias: DATA_MAX_ROWS takes precedence over the legacy DATABRICKS_MAX_ROWS.
+    MAX_ROWS = _policy_int('DATA_MAX_ROWS', 'DATABRICKS_MAX_ROWS', '500')
+
     # Query timeout in seconds
-    QUERY_TIMEOUT = int(os.getenv('DATABRICKS_QUERY_TIMEOUT', '120'))
+    QUERY_TIMEOUT = _policy_int('DATA_QUERY_TIMEOUT', 'DATABRICKS_QUERY_TIMEOUT', '120')
 
     # Process-local, object-scoped UC tool cache. 0 means no expiry.
     METADATA_CACHE_TTL_SECONDS = max(
         0,
-        int(os.getenv('DATABRICKS_METADATA_CACHE_TTL_SECONDS', '900')),
+        _policy_int(
+            'DATA_METADATA_CACHE_TTL_SECONDS',
+            'DATABRICKS_METADATA_CACHE_TTL_SECONDS',
+            '900',
+        ),
     )
     METADATA_AGENT_TIMEOUT_SECONDS = max(
         1,
@@ -124,6 +134,64 @@ class DatabricksConfig:
     def is_configured(cls) -> bool:
         """Return True when the minimum required variables are present."""
         return bool(cls.HOST and cls.TOKEN and cls.HTTP_PATH)
+
+
+class DataSourceConfig:
+    """Which storage backend is active. Exactly one data source runs per process."""
+
+    SUPPORTED_TYPES = ('databricks', 'mysql')
+    RAW_TYPE = os.getenv('DATA_SOURCE_TYPE', 'databricks').strip().lower()
+    # Unknown values fall back to databricks (backward compatible); the data-source
+    # factory logs a warning so the misconfiguration is visible.
+    TYPE = RAW_TYPE if RAW_TYPE in SUPPORTED_TYPES else 'databricks'
+
+
+class MySQLConfig:
+    """MySQL connection configuration (active when DATA_SOURCE_TYPE=mysql)."""
+
+    HOST = os.getenv('MYSQL_HOST', '')
+    PORT = max(1, int(os.getenv('MYSQL_PORT', '3306')))
+    USER = os.getenv('MYSQL_USER', '')
+    PASSWORD = os.getenv('MYSQL_PASSWORD', '')
+    CHARSET = os.getenv('MYSQL_CHARSET', 'utf8mb4')
+
+    # Comma-separated allowlist of databases exposed to agents; first item is the default.
+    _databases_raw = os.getenv('MYSQL_DATABASES', '')
+    DATABASES = [d.strip() for d in _databases_raw.split(',') if d.strip()]
+    DATABASE = DATABASES[0] if DATABASES else ''
+
+    # SQLAlchemy pool sizing. Total server-side connections are bounded by
+    # POOL_SIZE + POOL_MAX_OVERFLOW; keep well below MySQL max_connections (default 151).
+    POOL_SIZE = max(1, int(os.getenv('MYSQL_POOL_SIZE', '5')))
+    POOL_MAX_OVERFLOW = max(0, int(os.getenv('MYSQL_POOL_MAX_OVERFLOW', '5')))
+    POOL_RECYCLE_SECONDS = max(
+        60, int(os.getenv('MYSQL_POOL_RECYCLE_SECONDS', '3600'))
+    )
+
+    @classmethod
+    def is_configured(cls) -> bool:
+        """Return True when the minimum required variables are present."""
+        return bool(cls.HOST and cls.USER and cls.DATABASES)
+
+
+class DataSourcePolicyConfig:
+    """Source-agnostic query policy shared by every backend.
+
+    Values intentionally mirror DatabricksConfig.MAX_ROWS / QUERY_TIMEOUT /
+    METADATA_CACHE_TTL_SECONDS (both read the same DATA_* → DATABRICKS_* fallback
+    chain) so existing deployments keep one source of truth.
+    """
+
+    MAX_ROWS = _policy_int('DATA_MAX_ROWS', 'DATABRICKS_MAX_ROWS', '500')
+    QUERY_TIMEOUT = _policy_int('DATA_QUERY_TIMEOUT', 'DATABRICKS_QUERY_TIMEOUT', '120')
+    METADATA_CACHE_TTL_SECONDS = max(
+        0,
+        _policy_int(
+            'DATA_METADATA_CACHE_TTL_SECONDS',
+            'DATABRICKS_METADATA_CACHE_TTL_SECONDS',
+            '900',
+        ),
+    )
 
 
 class OntologyConfig:
@@ -220,6 +288,15 @@ def validate_config():
 
     if AzureOpenAIConfig.use_api_key() and not AzureOpenAIConfig.API_KEY:
         required_configs['AZURE_OPENAI_API_KEY'] = AzureOpenAIConfig.API_KEY
+
+    if DataSourceConfig.TYPE == 'mysql':
+        if not MySQLConfig.is_configured():
+            if not MySQLConfig.HOST:
+                required_configs['MYSQL_HOST'] = ''
+            if not MySQLConfig.USER:
+                required_configs['MYSQL_USER'] = ''
+            if not MySQLConfig.DATABASES:
+                required_configs['MYSQL_DATABASES'] = ''
     
     missing_configs = [key for key, value in required_configs.items() if not value]
     

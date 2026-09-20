@@ -154,7 +154,9 @@ Data-Insight-Agent-With-Ontology/
 - Azure subscription with:
     - Azure OpenAI service with primary GPT and small GPT deployments
     - Azure AI Foundry project only if logs are exported to an external evaluation workflow
-  - Azure Databricks with Unity Catalog SQL Warehouse (optional, for data insight)
+- One analytical data source (optional, for data insight):
+    - Azure Databricks with Unity Catalog SQL Warehouse (`DATA_SOURCE_TYPE=databricks`, default)
+    - MySQL 8.0+ (`DATA_SOURCE_TYPE=mysql`)
 
 ### Installation
 
@@ -191,6 +193,46 @@ AZURE_OPENAI_AUTH_MODE=aad
 # Leave AZURE_OPENAI_API_KEY empty or remove it
 # Ensure 'az login' identity has Cognitive Services OpenAI User role
 ```
+
+### Data Source Selection
+
+The backend talks to exactly one analytical data source, selected at startup:
+
+```
+DATA_SOURCE_TYPE=databricks   # default; also used when unset or invalid
+DATA_SOURCE_TYPE=mysql        # MySQL 8.0+
+```
+
+**MySQL mode** — add:
+```
+MYSQL_HOST=localhost
+MYSQL_PORT=3306
+MYSQL_USER=readonly_user
+MYSQL_PASSWORD=********
+MYSQL_DATABASES=sales,reporting   # allowlist; first entry is the default database
+```
+
+Rules enforced in MySQL mode:
+
+- Table references must be two-part `database.table` and every database must be inside `MYSQL_DATABASES`; bare table names and three-part `catalog.database.table` forms are rejected.
+- Queries are read-only: a blocklist/sqlglot validation layer plus a per-session `SET SESSION TRANSACTION READ ONLY` defense-in-depth on every pooled connection.
+- SQL is planned in the MySQL dialect — `QUALIFY` is unavailable.
+- Generic policy vars (`DATA_MAX_ROWS`, `DATA_QUERY_TIMEOUT`, `DATA_METADATA_CACHE_TTL_SECONDS`) fall back to the legacy `DATABRICKS_*` names, so existing `.env` files keep working.
+
+Recommended read-only MySQL account:
+```sql
+CREATE USER 'readonly_user'@'%' IDENTIFIED BY '********';
+GRANT SELECT ON sales.* TO 'readonly_user'@'%';
+GRANT SELECT ON reporting.* TO 'readonly_user'@'%';
+-- Plus metadata visibility:
+GRANT SELECT ON information_schema.TABLES TO 'readonly_user'@'%';
+GRANT SELECT ON information_schema.COLUMNS TO 'readonly_user'@'%';
+```
+
+Limitations in MySQL mode:
+
+- `analytics-spec` governed templates that hard-code three-part `catalog.schema.table` names will be blocked by scope validation; author MySQL-specific specs with two-part names or rely on dynamic `sql-planning`.
+- The shipped AdventureWorks OWL ontology carries Databricks mapping candidates; they remain *candidate claims* that MetadataAgent must verify, and `ONTOLOGY_DIR` can point at a MySQL-specific ontology when available.
 
 ### Running the Application
 
@@ -238,7 +280,10 @@ All configuration classes are in `src/config/settings.py`:
 
 - `AzureOpenAIConfig` — endpoint, API key, `AUTH_MODE`, API version, GPT deployments
 - `AzureAIFoundryConfig` — optional connection-string placeholder for deployment-specific integrations
+- `DataSourceConfig` — active data-source type (`DATA_SOURCE_TYPE=databricks|mysql`, default `databricks`)
 - `DatabricksConfig` — workspace host, token, SQL warehouse HTTP path, Unity Catalog allowlist, query limits, metadata cache, recall index/candidate bounds, and small-schema fallback bound
+- `MySQLConfig` — host, port, user, password, charset, `MYSQL_DATABASES` allowlist, and SQLAlchemy pool sizing/recycle
+- `DataSourcePolicyConfig` — source-agnostic `DATA_MAX_ROWS` / `DATA_QUERY_TIMEOUT` / `DATA_METADATA_CACHE_TTL_SECONDS` (falling back to legacy `DATABRICKS_*` names)
 - `OntologyConfig` — OWL directory/glob, local-only loading, optional reasoner, query limits, fuzzy threshold, escalation confidence, and agent timeout
 - `AppConfig` — log level, MAF function-loop budgets, feature flag defaults, directory paths
 

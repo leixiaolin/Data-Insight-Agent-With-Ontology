@@ -1,4 +1,4 @@
-"""On-demand, object-scoped Unity Catalog metadata caching."""
+"""On-demand, object-scoped metadata caching over the active MetadataProvider."""
 
 from __future__ import annotations
 
@@ -12,7 +12,12 @@ import threading
 import time
 from typing import Any, Optional
 
-from .config import DatabricksConfig
+from .config import DataSourcePolicyConfig
+from .data_sources import (
+    MetadataProvider,
+    get_active_metadata_provider,
+    get_scope_rules,
+)
 
 _SQL_RESERVED = {
     "ON", "WHERE", "JOIN", "LEFT", "RIGHT", "FULL", "INNER", "OUTER",
@@ -27,13 +32,25 @@ class _CacheEntry:
 
 
 class MetadataCatalogService:
-    """Cache only the UC objects requested by MetadataAgent tools."""
+    """Cache only the metadata objects requested by MetadataAgent tools.
 
-    def __init__(self, ttl_seconds: Optional[int] = None) -> None:
+    Fetching is delegated to the active MetadataProvider (Unity Catalog for
+    databricks, information_schema for MySQL); caching, candidate search, and
+    identifier rewriting are source-agnostic and live here.
+    """
+
+    def __init__(
+        self,
+        ttl_seconds: Optional[int] = None,
+        provider: Optional[MetadataProvider] = None,
+    ) -> None:
         self.ttl_seconds = (
-            DatabricksConfig.METADATA_CACHE_TTL_SECONDS
+            DataSourcePolicyConfig.METADATA_CACHE_TTL_SECONDS
             if ttl_seconds is None
             else max(0, ttl_seconds)
+        )
+        self._provider = (
+            provider if provider is not None else get_active_metadata_provider()
         )
         self._lock = threading.RLock()
         self._schema_cache: dict[str, _CacheEntry] = {}
@@ -41,7 +58,7 @@ class MetadataCatalogService:
         self._table_detail_cache: dict[str, _CacheEntry] = {}
 
     def invalidate(self) -> None:
-        """Clear every object cache without changing UC data."""
+        """Clear every object cache without changing backend data."""
         with self._lock:
             self._schema_cache.clear()
             self._table_list_cache.clear()
@@ -54,19 +71,14 @@ class MetadataCatalogService:
         force_refresh: bool = False,
     ) -> tuple[list[str], bool]:
         """List schemas, caching only this catalog-level result."""
-        catalog = catalog or DatabricksConfig.CATALOG
+        rules = get_scope_rules()
+        catalog = catalog or rules.catalog
         key = catalog.casefold()
         cached = self._read_cache(self._schema_cache, key, force_refresh)
         if cached is not None:
             return cached, True
 
-        schemas = [
-            schema.name
-            for schema in self._workspace_client().schemas.list(
-                catalog_name=catalog
-            )
-            if schema.name
-        ]
+        schemas = list(self._provider.list_schemas(catalog=catalog))
         schemas.sort(key=str.casefold)
         self._write_cache(self._schema_cache, key, schemas)
         return deepcopy(schemas), False
@@ -81,27 +93,14 @@ class MetadataCatalogService:
         """List table summaries without fetching any table's columns."""
         if not schema:
             raise ValueError("schema is required when listing tables")
-        catalog = catalog or DatabricksConfig.CATALOG
+        rules = get_scope_rules()
+        catalog = catalog or rules.catalog
         key = (catalog.casefold(), schema.casefold())
         cached = self._read_cache(self._table_list_cache, key, force_refresh)
         if cached is not None:
             return cached, True
 
-        tables = [
-            {
-                "name": table.name,
-                "full_name": table.full_name
-                or f"{catalog}.{schema}.{table.name}",
-                "schema": schema,
-                "table_type": str(table.table_type),
-                "comment": table.comment or "",
-            }
-            for table in self._workspace_client().tables.list(
-                catalog_name=catalog,
-                schema_name=schema,
-            )
-            if table.name
-        ]
+        tables = list(self._provider.list_tables(catalog=catalog, schema=schema))
         tables.sort(key=lambda table: table["full_name"].casefold())
         self._write_cache(self._table_list_cache, key, tables)
         return deepcopy(tables), False
@@ -120,35 +119,20 @@ class MetadataCatalogService:
             catalog=catalog,
             schema=schema,
         )
-        full_name = f"{catalog}.{schema}.{bare_name}"
+        rules = get_scope_rules()
+        if rules.qualified_parts == 3:
+            full_name = f"{catalog}.{schema}.{bare_name}"
+        else:
+            full_name = f"{schema}.{bare_name}"
         key = full_name.casefold()
         cached = self._read_cache(self._table_detail_cache, key, force_refresh)
         if cached is not None:
             return cached, True
 
-        try:
-            table = self._workspace_client().tables.get(full_name=full_name)
-        except Exception as exc:
-            if self._is_not_found(exc):
-                return None, False
-            raise
+        detail = self._provider.get_table(catalog=catalog, schema=schema, table=bare_name)
+        if detail is None:
+            return None, False
 
-        detail = {
-            "name": bare_name,
-            "full_name": full_name,
-            "schema": schema,
-            "table_type": str(table.table_type),
-            "comment": getattr(table, "comment", "") or "",
-            "owner": getattr(table, "owner", "") or "",
-            "columns": [
-                self._column_payload(column)
-                for column in (table.columns or [])
-                if column.name
-            ],
-        }
-        table_tags = self._tags_payload(getattr(table, "tags", None))
-        if table_tags:
-            detail["table_tags"] = table_tags
         self._write_cache(self._table_detail_cache, key, detail)
         return deepcopy(detail), False
 
@@ -167,7 +151,7 @@ class MetadataCatalogService:
         return self._matching_tables(tables, keyword), cache_hit
 
     def cached_table_details(self) -> list[dict[str, Any]]:
-        """Return unexpired table details already held, without contacting Unity Catalog."""
+        """Return unexpired table details already held, without contacting the backend."""
         with self._lock:
             return [
                 deepcopy(entry.value)
@@ -346,64 +330,31 @@ class MetadataCatalogService:
         )
 
     @staticmethod
-    def _workspace_client():
-        if not DatabricksConfig.is_configured():
-            raise RuntimeError("Databricks connection is not configured")
-        from databricks.sdk import WorkspaceClient
-
-        return WorkspaceClient(
-            host=DatabricksConfig.HOST,
-            token=DatabricksConfig.TOKEN,
-        )
-
-    @staticmethod
     def _qualified_table_parts(
         table_name: str,
         *,
         catalog: str,
         schema: str,
     ) -> tuple[str, str, str]:
+        rules = get_scope_rules()
         parts = table_name.replace("`", "").split(".")
-        catalog = catalog or DatabricksConfig.CATALOG
-        schema = schema or DatabricksConfig.SCHEMA
-        if len(parts) == 3:
-            catalog, schema, table_name = parts
-        elif len(parts) == 2:
-            schema, table_name = parts
-        elif len(parts) == 1:
-            table_name = parts[0]
-        else:
+        if len(parts) > rules.qualified_parts:
             raise ValueError(f"Invalid table name: {table_name}")
+        catalog = catalog or rules.catalog
+        schema = schema or rules.default_schema
+        if rules.qualified_parts == 3:
+            if len(parts) == 3:
+                catalog, schema, table_name = parts
+            elif len(parts) == 2:
+                schema, table_name = parts
+            else:
+                table_name = parts[0]
+        else:
+            if len(parts) == 2:
+                schema, table_name = parts
+            else:
+                table_name = parts[0]
         return catalog, schema, table_name
-
-    @staticmethod
-    def _column_payload(column: Any) -> dict[str, Any]:
-        result = {
-            "name": column.name,
-            "type": str(column.type_name),
-            "nullable": getattr(column, "nullable", None),
-            "comment": getattr(column, "comment", "") or "",
-        }
-        tags = MetadataCatalogService._tags_payload(
-            getattr(column, "tags", None)
-        )
-        if tags:
-            result["tags"] = tags
-        return result
-
-    @staticmethod
-    def _tags_payload(tags: Any) -> dict[str, Any]:
-        if not tags:
-            return {}
-        try:
-            return dict(tags.items())
-        except (AttributeError, TypeError, ValueError):
-            return {}
-
-    @staticmethod
-    def _is_not_found(exc: Exception) -> bool:
-        text = str(exc).casefold()
-        return "not found" in text or "does not exist" in text
 
     @classmethod
     def _matching_tables(

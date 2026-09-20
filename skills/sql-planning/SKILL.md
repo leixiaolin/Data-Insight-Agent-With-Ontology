@@ -1,8 +1,8 @@
 ---
 name: sql-planning
-description: Dynamically plans ad-hoc Databricks SQL from user intent, optional OWL business semantics, and verified Unity Catalog metadata. Load for every analysis that does not match a governed SQL template.
+description: Dynamically plans ad-hoc read-only SQL from user intent, optional OWL business semantics, and verified data-source metadata. Dialect and naming follow the runtime data source. Load for every analysis that does not match a governed SQL template.
 metadata:
-  tags: ontology, sql, databricks, dynamic-planning
+  tags: ontology, sql, dynamic-planning
 ---
 
 # SQL Planning
@@ -16,8 +16,8 @@ process, not a metric catalog, fixed analytical formula, default comparison, or 
 - When available, ontology context is authoritative for business meaning: entities, property
    domains and ranges, labels, definitions, class restrictions, hierarchy, relationship roles, and
    semantic paths. When unavailable, do not manufacture ontology evidence.
-- Unity Catalog metadata is authoritative for physical tables, columns, data types, keys, join
-  directions, cardinality, and availability.
+- Verified data-source metadata is authoritative for physical tables, columns, data types, keys,
+  join directions, cardinality, and availability.
 - Neither an ontology entity name nor a candidate mapping is an executable SQL identifier until
   MetadataAgent has verified it.
 
@@ -35,7 +35,7 @@ only the parts it does not cover.
    level that can distinguish the requested groups; if a broader level is constant and a finer level
    is available, use the finer level and state that choice.
 - Reconcile semantic property names and labels with verified column names case-insensitively, but
-   use the exact Unity Catalog spelling in SQL.
+   use the exact verified catalog spelling in SQL.
 
 ## Dynamic Planning Workflow
 
@@ -76,15 +76,17 @@ sets `requires_follow_up=true`:
 
 ## SQL Engineering
 
-- Use verified fully qualified `catalog.schema.table` names and explicit columns. Avoid `SELECT *`.
-- Generate read-only SparkSQL/Databricks SQL and apply the configured row limit unless the user
-   explicitly requests all rows.
+- Use verified fully qualified table names in the runtime data source's naming form
+   (`catalog.schema.table` or `database.table`, per the session context block) and explicit
+   columns. Avoid `SELECT *`.
+- Generate read-only SQL in the configured data source's dialect and apply the configured row
+   limit unless the user explicitly requests all rows.
 - Preserve the selected metric's grain across one-to-many joins. Aggregate each source at the
    required grain before combining values that would otherwise be duplicated.
 - Build ratios from numerator and denominator aggregates at compatible grains.
 - Aggregate before applying ranking windows; keep ranking and output cardinality separate from the
    metric calculation.
-- Prefer ANSI SQL constructs, using Spark-specific functions only when they are needed.
+- Prefer ANSI SQL constructs, using dialect-specific functions only when they are needed.
 - On an execution error, use the returned error and verified metadata to make one focused repair;
    do not change the user's metric or business definition merely to make the query run.
 
