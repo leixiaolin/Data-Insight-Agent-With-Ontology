@@ -128,7 +128,7 @@ const ActivityRow: React.FC<{ activity: ActivityItem }> = ({ activity }) => {
     <>
       <StateDot state={activity.state} />
       <span className="activity-tool-name">{activity.content}</span>
-      {activity.kind === 'skill' && <span className="activity-kind-badge">Skill</span>}
+      {activity.kind === 'skill' && <span className="activity-kind-badge">技能</span>}
       {activity.agent && <span className="activity-agent">{activity.agent}</span>}
     </>
   );

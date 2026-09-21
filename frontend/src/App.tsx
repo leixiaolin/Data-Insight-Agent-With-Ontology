@@ -225,13 +225,13 @@ function App() {
   const openBusinessLayer = async () => {
     setBusinessLayerOpen(true);
     setBusinessLayerBusy(true);
-    setBusinessLayerStatus('Loading…');
+    setBusinessLayerStatus('正在加载…');
     try {
       const { content } = await apiService.getBusinessLayer();
       setBusinessLayerDraft(content);
       setBusinessLayerStatus('');
     } catch {
-      setBusinessLayerStatus('Could not load the document.');
+      setBusinessLayerStatus('无法加载文档。');
     } finally {
       setBusinessLayerBusy(false);
     }
@@ -239,12 +239,12 @@ function App() {
 
   const persistBusinessLayer = async () => {
     setBusinessLayerBusy(true);
-    setBusinessLayerStatus('Saving…');
+    setBusinessLayerStatus('正在保存…');
     try {
       const { length } = await apiService.saveBusinessLayer(businessLayerDraft);
-      setBusinessLayerStatus(`Saved (${length} characters). It applies from your next question.`);
+      setBusinessLayerStatus(`已保存（${length} 字符），将从下一个问题开始生效。`);
     } catch {
-      setBusinessLayerStatus('Save failed.');
+      setBusinessLayerStatus('保存失败。');
     } finally {
       setBusinessLayerBusy(false);
     }
@@ -320,7 +320,7 @@ function App() {
       const result = await apiService.createThread();
       const newSession: SessionInfo = {
         id: result.thread_id,
-        name: 'Session 1',
+        name: '会话 1',
         created_at: new Date().toISOString(),
         message_count: 0
       };
@@ -340,7 +340,7 @@ function App() {
       const result = await apiService.createThread();
       const newSession: SessionInfo = {
         id: result.thread_id,
-        name: `Session ${sessionCounter}`,
+        name: `会话 ${sessionCounter}`,
         created_at: new Date().toISOString(),
         message_count: 0
       };
@@ -710,7 +710,7 @@ function App() {
       {/* Sidebar */}
       <div className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
         <div className="sidebar-header">
-          <h1 className="sidebar-title gradient-text">Ontology Data Agent</h1>
+          <h1 className="sidebar-title gradient-text">本体数据智能体</h1>
           <button
             className="toggle-btn"
             onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
@@ -722,18 +722,18 @@ function App() {
         <div className="sidebar-content">
           {/* Function Buttons Section */}
           <div className="nav-section">
-            <div className="nav-section-title">Functions</div>
+            <div className="nav-section-title">功能</div>
             <button className="nav-item" onClick={createNewSession}>
               <span className="nav-icon">➕</span>
-              <span className="nav-text">New Session</span>
+              <span className="nav-text">新建会话</span>
             </button>
           </div>
 
           {!sidebarCollapsed && (
             <div className="nav-section">
-              <div className="nav-section-title">Session Settings</div>
+              <div className="nav-section-title">会话设置</div>
               <label className="session-toggle-row">
-                <span className="session-toggle-label">Ontology</span>
+                <span className="session-toggle-label">本体模式</span>
                 <input
                   className="session-toggle-input"
                   type="checkbox"
@@ -741,7 +741,7 @@ function App() {
                   checked={ontologyEnabled}
                   disabled={!currentSessionId}
                   onChange={(event) => setCurrentSessionOntology(event.target.checked)}
-                  aria-label="Enable ontology for this session"
+                  aria-label="为本会话启用本体模式"
                 />
                 <span className="session-toggle-track" aria-hidden="true">
                   <span className="session-toggle-thumb" />
@@ -752,7 +752,7 @@ function App() {
 
           {/* Current Chat Section */}
           <div className="nav-section">
-            <div className="nav-section-title">Active Session</div>
+            <div className="nav-section-title">会话列表</div>
             {!sidebarCollapsed && sessions.map((session) => (
               <button
                 key={session.id}
@@ -770,7 +770,7 @@ function App() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}>
                   <span className="nav-icon">💬</span>
                   <span className="nav-text" style={{ fontSize: '13px' }}>
-                    {session.name}{loadingSessionIds.has(session.id) ? ' · Running' : ''}
+                    {session.name}{loadingSessionIds.has(session.id) ? ' · 运行中' : ''}
                   </span>
                 </div>
                 <span
@@ -831,15 +831,15 @@ function App() {
       <div className="main-content">
         <div className="chat-header">
           <div className="chat-title">
-            {currentSessionId ? `Session: ${currentSessionId.substring(0, 20)}...` : 'Ontology Data Agent'}
+            {currentSessionId ? `会话：${currentSessionId.substring(0, 20)}...` : 'Ontology Data Agent'}
           </div>
           <div className="header-actions">
             <button
               className="icon-btn"
               onClick={openBusinessLayer}
-              title="Workspace business semantics shared by every session"
+              title="全体会话共享的工作区业务语义"
             >
-              📘 Business Layer Doc
+              📘 业务层文档
             </button>
           </div>
         </div>
@@ -850,14 +850,13 @@ function App() {
               {messages.length === 0 ? (
                 <div className="empty-state">
                   <div className="empty-state-icon"><OntologyMark /></div>
-                  <h2 className="empty-state-title">Welcome to Ontology Data Agent</h2>
+                  <h2 className="empty-state-title">欢迎使用 Ontology Data Agent</h2>
                   <p className="empty-state-desc">
-                    Ask a business question in your own words. An OWL ontology resolves the business
-                    meaning, Unity Catalog verifies the physical tables and columns, and the analysis
-                    runs as read-only SQL on Databricks.
+                    用日常语言提出你的业务问题。OWL 本体负责解析业务含义，数据目录负责校验物理表和列，
+                    分析过程以只读 SQL 的方式运行。
                     <br />
-                    Toggle Ontology in the sidebar to compare ontology-guided and metadata-only analysis,
-                    or try one of the example queries to get started.
+                    可以在侧边栏切换本体模式，对比本体引导与仅元数据的分析效果，
+                    也可以直接点击示例问题开始体验。
                   </p>
                 </div>
               ) : (
@@ -944,16 +943,16 @@ function App() {
                   value={inputValue}
                   onChange={(e) => setInputValue(e.target.value)}
                   onKeyPress={handleKeyPress}
-                  placeholder="Ask about business metrics, data analytics, or Databricks schema..."
+                  placeholder="输入业务指标、数据分析或数据表结构相关的问题…"
                   disabled={isLoading}
                 />
                 <button
                   className={`send-btn ${isLoading ? 'stop' : ''}`}
                   onClick={isLoading ? stopCurrentTask : sendMessageStream}
                   disabled={!isLoading && !inputValue.trim()}
-                  title={isLoading ? '停止当前 Session 的任务' : '发送消息'}
+                  title={isLoading ? '停止当前会话的任务' : '发送消息'}
                 >
-                  {isLoading ? '■ Stop' : 'Send'}
+                  {isLoading ? '■ 停止' : '发送'}
                 </button>
               </div>
             </div>
@@ -965,25 +964,25 @@ function App() {
         <div className="business-layer-overlay" onClick={() => setBusinessLayerOpen(false)}>
           <div className="business-layer-modal" onClick={(e) => e.stopPropagation()}>
             <div className="business-layer-header">
-              <div className="business-layer-title">📘 Business Layer Doc</div>
+              <div className="business-layer-title">📘 业务层文档</div>
               <button className="icon-btn" onClick={() => setBusinessLayerOpen(false)}>✕</button>
             </div>
             <div className="business-layer-hint">
-              Describe your business semantics — terminology, metric definitions, and reporting rules.
-              It is shared by the whole workspace and given to the analysis agent with every question,
-              whether Ontology is on or off. Verified Databricks schema always takes precedence.
+              在这里描述你的业务语义——术语、指标定义和报表规则。
+              它由整个工作区共享，无论本体模式是否开启，都会随每个问题提供给分析智能体。
+              已验证的数据库表结构始终优先。
             </div>
             <textarea
               className="business-layer-textarea"
               value={businessLayerDraft}
               onChange={(e) => setBusinessLayerDraft(e.target.value)}
               disabled={businessLayerBusy}
-              placeholder={'# Terminology\n- VIP customer = a customer whose yearly spend exceeds the agreed threshold\n\n# Metric definitions\n- Revenue = sum of order totals'}
+              placeholder={'# 术语\n- VIP 客户 = 年消费超过约定阈值的客户\n\n# 指标定义\n- 收入 = 订单总金额之和'}
             />
             <div className="business-layer-footer">
               <span className="business-layer-status">{businessLayerStatus}</span>
               <button className="icon-btn" onClick={persistBusinessLayer} disabled={businessLayerBusy}>
-                Save
+                保存
               </button>
             </div>
           </div>
