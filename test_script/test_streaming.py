@@ -54,6 +54,33 @@ class _FakeMasterAgent:
         yield _Update(text="Final answer.")
 
 
+class _ReasoningMasterAgent:
+    async def chat_stream(self, *args, **kwargs):
+        yield _Update(contents=[_Content("text_reasoning", text="Private English reasoning")])
+        yield _Update(text="中文回答。")
+
+
+def test_raw_model_reasoning_is_not_sent_to_frontend() -> None:
+    async def run_test() -> None:
+        original = main.state.master_agent
+        main.state.master_agent = _ReasoningMasterAgent()
+        active_run = main.ActiveRun(run_id="reasoning-test", cancel_event=Event())
+        try:
+            chunks = [
+                chunk
+                async for chunk in main._stream_agent_response(
+                    "中文问题", object(), "reasoning-test-thread", active_run
+                )
+            ]
+        finally:
+            main.state.master_agent = original
+
+        assert "Private English reasoning" not in "".join(chunks)
+        assert any("中文回答。" in chunk for chunk in chunks)
+
+    asyncio.run(run_test())
+
+
 def test_working_text_is_separate_from_final_answer() -> None:
     async def run_test() -> None:
         original = main.state.master_agent

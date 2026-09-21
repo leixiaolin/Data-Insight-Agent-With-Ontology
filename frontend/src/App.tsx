@@ -483,7 +483,8 @@ function App() {
       };
 
       const upsertThinking = (data: Record<string, unknown>) => {
-        const content = typeof data.message === 'string' ? data.message.trim() : '';
+        const content = typeof data.message === 'string' ? data.message : '';
+        if (!content.trim() && data.append !== true) return;
         if (!content) return;
 
         const id = typeof data.id === 'string' && data.id

@@ -10,13 +10,75 @@ from agent_framework import (
     AgentResponse,
     AgentResponseUpdate,
     AgentSession,
+    Content,
     ContextProvider,
+    Message,
     ResponseStream,
 )
 from agent_framework.openai import OpenAIChatCompletionClient
-from azure.identity import DefaultAzureCredential
 
-from ..config import AppConfig, AzureOpenAIConfig
+from ..config import AppConfig, OpenAIConfig
+
+
+class CompatibleOpenAIChatCompletionClient(OpenAIChatCompletionClient):
+    """Preserve reasoning fields used by OpenAI-compatible thinking models.
+
+    MAF 1.11 understands OpenRouter's ``reasoning_details`` extension, while
+    DeepSeek-style endpoints return ``reasoning_content`` and require that exact
+    value on the assistant tool-call message in the next model request.  Without
+    this adapter, the first tool call succeeds and the following model roundtrip
+    fails with HTTP 400 because the reasoning prefix was discarded.
+    """
+
+    @staticmethod
+    def _reasoning_content(value: Any) -> str | None:
+        reasoning = getattr(value, "reasoning_content", None)
+        return reasoning if isinstance(reasoning, str) and reasoning else None
+
+    def _parse_response_from_openai(self, response: Any, options: Any) -> Any:
+        parsed = super()._parse_response_from_openai(response, options)
+        for choice, message in zip(response.choices, parsed.messages):
+            if reasoning := self._reasoning_content(choice.message):
+                message.contents.append(Content.from_text_reasoning(text=reasoning))
+        return parsed
+
+    def _parse_response_update_from_openai(self, chunk: Any) -> Any:
+        parsed = super()._parse_response_update_from_openai(chunk)
+        for choice in chunk.choices:
+            if choice.delta is not None and (
+                reasoning := self._reasoning_content(choice.delta)
+            ):
+                parsed.contents.append(Content.from_text_reasoning(text=reasoning))
+        return parsed
+
+    def _prepare_message_for_openai(self, message: Message) -> list[dict[str, Any]]:
+        reasoning_parts = [
+            content.text
+            for content in message.contents
+            if content.type == "text_reasoning" and content.text
+        ]
+        if not reasoning_parts or message.role != "assistant":
+            return super()._prepare_message_for_openai(message)
+
+        # Text reasoning must not become ordinary assistant content.  Serialize
+        # the remaining contents with MAF, then restore the provider extension.
+        filtered = Message(
+            role=message.role,
+            contents=[
+                content
+                for content in message.contents
+                if not (content.type == "text_reasoning" and content.text)
+            ],
+            author_name=message.author_name,
+            message_id=message.message_id,
+            additional_properties=message.additional_properties,
+            raw_representation=message.raw_representation,
+        )
+        prepared = super()._prepare_message_for_openai(filtered)
+        if not prepared:
+            prepared = [{"role": "assistant", "content": ""}]
+        prepared[0]["reasoning_content"] = "".join(reasoning_parts)
+        return prepared
 
 
 def create_chat_client(
@@ -25,11 +87,11 @@ def create_chat_client(
     max_iterations: Optional[int] = None,
     max_function_calls: Optional[int] = None,
 ) -> OpenAIChatCompletionClient:
-    """Create the MAF OpenAI provider configured for Azure OpenAI."""
+    """Create the MAF client for an OpenAI-compatible endpoint."""
     common: dict[str, Any] = {
-        "model": model or AzureOpenAIConfig.GPT_DEPLOYMENT,
-        "azure_endpoint": AzureOpenAIConfig.ENDPOINT,
-        "api_version": AzureOpenAIConfig.API_VERSION,
+        "model": model or OpenAIConfig.MODEL,
+        "base_url": OpenAIConfig.BASE_URL,
+        "api_key": OpenAIConfig.API_KEY,
         "function_invocation_configuration": {
             "enabled": True,
             "max_iterations": (
@@ -47,11 +109,7 @@ def create_chat_client(
             ),
         },
     }
-    if AzureOpenAIConfig.use_api_key():
-        common["api_key"] = AzureOpenAIConfig.API_KEY
-    else:
-        common["credential"] = DefaultAzureCredential()
-    return OpenAIChatCompletionClient(**common)
+    return CompatibleOpenAIChatCompletionClient(**common)
 
 
 def create_agent(
@@ -66,7 +124,7 @@ def create_agent(
     max_function_calls: Optional[int] = None,
 ) -> Agent:
     """Create a MAF Agent while keeping construction consistent across sub-agents."""
-    selected_model = model or AzureOpenAIConfig.GPT_DEPLOYMENT
+    selected_model = model or OpenAIConfig.MODEL
     resolved_tools = list(tools)
     resolved_providers = list(context_providers or [])
     default_options: dict[str, Any] = {}

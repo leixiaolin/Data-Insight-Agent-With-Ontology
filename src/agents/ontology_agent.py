@@ -9,7 +9,7 @@ from typing import Annotated, Any, List, Optional
 
 from pydantic import Field
 
-from ..config import AgentReasoningConfig, AzureOpenAIConfig, OntologyConfig
+from ..config import AgentReasoningConfig, OpenAIConfig, OntologyConfig
 from ..ontology import OntologyService
 from ..prompts import ONTOLOGY_AGENT_PROMPT, ONTOLOGY_ROUTER_PROMPT
 from ..skills_provider import create_skills_provider
@@ -375,7 +375,7 @@ class OntologyAgent:
             instructions=ONTOLOGY_AGENT_PROMPT + runtime_context,
             tools=tools,
             reasoning_effort=AgentReasoningConfig.ONTOLOGY,
-            model=AzureOpenAIConfig.GPT_DEPLOYMENT,
+            model=OpenAIConfig.MODEL,
             max_iterations=OntologyConfig.AGENT_MAX_MODEL_ROUNDTRIPS,
             max_function_calls=OntologyConfig.AGENT_MAX_FUNCTION_CALLS,
         )
@@ -389,7 +389,7 @@ class OntologyAgent:
             tools=[],
             reasoning_effort=AgentReasoningConfig.ONTOLOGY,
             context_providers=[skills_provider] if skills_provider else None,
-            model=AzureOpenAIConfig.GPT_DEPLOYMENT,
+            model=OpenAIConfig.MODEL,
             max_iterations=OntologyConfig.AGENT_MAX_MODEL_ROUNDTRIPS,
             max_function_calls=OntologyConfig.AGENT_MAX_FUNCTION_CALLS,
         )

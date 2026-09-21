@@ -93,7 +93,7 @@ OWL 文件里显式写出来的事实只是冰山一角。举个例子：你在�
 | 层次 | 技术选型 | 用途 |
 |---|---|---|
 | Agent 编排框架 | Microsoft Agent Framework（MAF） | 提供 agentic loop、工具调用（function calling）注册、渐进式加载的 Skill 系统（SkillsProvider / FileSkillsSource），是本文三个子智能体和 MasterAgent 的共同底座 |
-| LLM 提供方 | Azure OpenAI | 按任务复杂度分两档部署：需要深度推理的环节用主力模型，路由判断、格式化这类轻量任务用响应更快的小模型 |
+| LLM 提供方 | OpenAI 兼容接口（默认 DeepSeek） | 按任务复杂度分两档：主分析使用 `OPENAI_MODEL`，元数据发现/验证使用 `OPENAI_SMALL_MODEL` |
 | 本体查询 | Owlready2 + HermiT | 详见 2.2、2.3——本体是只读加载的 OWL 文件，不引入图数据库或 SPARQL 端点 |
 | 数据仓库 | Azure Databricks | SQL Warehouse 负责 SQL 执行，Unity Catalog （Databricks 自带的数据治理层）是物理表/列/类型/权限的唯一权威来源 |
 | SQL 解析与校验 | sqlglot | 详见 6.3——对生成的 SQL 做 catalog/schema 作用域静态校验 |
@@ -127,7 +127,7 @@ flowchart TD
         FS --> SP
     end
 
-    subgraph AgentLayer["Agent Layer — Microsoft Agent Framework · Azure OpenAI"]
+    subgraph AgentLayer["Agent Layer — Microsoft Agent Framework · OpenAI-compatible API"]
         MA(["🧠 MasterAgent\nBounded agentic loop"])
         OA(["OntologyRouter + OntologyAgent"])
         DIA(["📊 DataInsightAgent"])
@@ -136,7 +136,7 @@ flowchart TD
     end
 
     subgraph AzureServices["Azure Services"]
-        AOAI["☁️ Azure OpenAI\nprimary + small GPT deployments"]
+        AOAI["☁️ DeepSeek / OpenAI-compatible API\nprimary + small models"]
         AIF["Azure AI Foundry\nOptional external evaluation"]
     end
 

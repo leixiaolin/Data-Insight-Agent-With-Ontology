@@ -124,6 +124,16 @@ class MySQLMetadataProvider:
             columns = list(result.keys())
             return [dict(zip(columns, row)) for row in result.fetchall()]
 
+    @staticmethod
+    def _allowlisted_database(schema: str) -> Optional[str]:
+        """Return the configured spelling for *schema*, or None when out of scope."""
+        requested = (schema or "").casefold()
+        return next(
+            (database for database in MySQLConfig.DATABASES
+             if database.casefold() == requested),
+            None,
+        )
+
     def list_schemas(self, *, catalog: str = "") -> list[str]:
         """Return allowlisted databases that actually exist on the server."""
         databases = list(MySQLConfig.DATABASES)
@@ -143,6 +153,9 @@ class MySQLMetadataProvider:
     def list_tables(self, *, schema: str, catalog: str = "") -> list[dict[str, Any]]:
         if not schema:
             raise ValueError("schema is required when listing tables")
+        schema = self._allowlisted_database(schema) or ""
+        if not schema:
+            return []
         rows = self._fetchall(
             "SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT "
             "FROM information_schema.TABLES "
@@ -171,6 +184,9 @@ class MySQLMetadataProvider:
         table: str,
     ) -> Optional[dict[str, Any]]:
         schema = schema or MySQLConfig.DATABASE
+        schema = self._allowlisted_database(schema) or ""
+        if not schema:
+            return None
         table_rows = self._fetchall(
             "SELECT TABLE_TYPE, TABLE_COMMENT "
             "FROM information_schema.TABLES "

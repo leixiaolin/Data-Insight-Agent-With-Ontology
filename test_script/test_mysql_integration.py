@@ -6,6 +6,7 @@ running Docker daemon; the whole module skips automatically otherwise.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 
@@ -61,7 +62,7 @@ def mysql_host_port():
     from testcontainers.mysql import MySqlContainer
 
     try:
-        container = MySqlContainer("mysql:8.0")
+        container = MySqlContainer(os.getenv("MYSQL_TEST_IMAGE", "mysql:8.0"))
         container.start()
     except Exception as exc:  # Docker daemon down, image pull failure, etc.
         pytest.skip(f"MySQL testcontainer unavailable: {exc}")
@@ -76,7 +77,7 @@ def admin_engine(mysql_host_port):
     """Unrestricted engine used only for DDL, seeding, and connection kills."""
     host, port = mysql_host_port
     return create_engine(
-        f"mysql+pymysql://root:test@{host}:{port}/?charset=utf8mb4"
+        f"mysql+pymysql://root:test@{host}:{port}/{ALLOWLIST_DB}?charset=utf8mb4"
     )
 
 
@@ -116,7 +117,7 @@ def mysql_factory(data_source):
 
 def test_execute_query_returns_result_contract(data_source):
     result = data_source.execute_query(
-        "SELECT CustomerID, FullName FROM customers ORDER BY CustomerID"
+        "SELECT CustomerID, FullName FROM test.customers ORDER BY CustomerID"
     )
     assert result.columns == ["CustomerID", "FullName"]
     assert result.row_count == 3
@@ -126,7 +127,7 @@ def test_execute_query_returns_result_contract(data_source):
 
 def test_max_rows_truncates_result(data_source):
     result = data_source.execute_query(
-        "SELECT SalesOrderID FROM salesorders ORDER BY SalesOrderID",
+        "SELECT SalesOrderID FROM test.salesorders ORDER BY SalesOrderID",
         max_rows=2,
     )
     assert result.row_count == 2
@@ -135,13 +136,20 @@ def test_max_rows_truncates_result(data_source):
 
 def test_utf8_values_round_trip(data_source):
     result = data_source.execute_query(
-        "SELECT FullName FROM customers WHERE CustomerID = 2"
+        "SELECT FullName FROM test.customers WHERE CustomerID = 2"
     )
     assert result.rows == [["李雷"]]
 
 
 def test_concurrent_queries_run_in_parallel(data_source):
     """Three SLEEP(2) queries must overlap: serialised execution would need ≥6 s."""
+    # Establish three pooled connections before timing. Container/host networking
+    # can make initial authentication slow; this assertion is about concurrent
+    # query execution, not cold connection setup.
+    warm_connections = [data_source.engine().connect() for _ in range(3)]
+    for connection in warm_connections:
+        connection.close()
+
     results = []
     errors = []
 
@@ -182,7 +190,7 @@ def test_pre_ping_recovers_after_server_side_kill(data_source, admin_engine):
 def test_read_only_session_rejects_writes_at_the_database_level(data_source):
     with pytest.raises(Exception, match="(?i)read only"):
         data_source.execute_query(
-            "INSERT INTO salesorders (SalesOrderID, CustomerID, OrderDate, TotalDue) "
+            "INSERT INTO test.salesorders (SalesOrderID, CustomerID, OrderDate, TotalDue) "
             "VALUES (9999, 1, '2024-01-01', 1.00)"
         )
 
@@ -248,6 +256,11 @@ def test_get_table_returns_none_for_missing_table(data_source):
 def test_get_table_returns_none_for_database_outside_allowlist(data_source):
     provider = MySQLMetadataProvider(data_source=data_source)
     assert provider.get_table(catalog="", schema="mysql", table="user") is None
+
+
+def test_list_tables_returns_empty_for_database_outside_allowlist(data_source):
+    provider = MySQLMetadataProvider(data_source=data_source)
+    assert provider.list_tables(schema="information_schema") == []
 
 
 # ─── MetadataCatalogService over the mysql provider ──────────────────────────

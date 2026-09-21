@@ -18,16 +18,16 @@ type ActivityGroup = {
 type DisplayActivity = ActivityItem | ActivityGroup;
 
 const metricLabels: Record<string, string> = {
-  dimensions: 'dimensions',
-  candidate_count: 'candidates',
-  requested_candidates: 'requested',
-  ranked_count: 'ranked',
-  after_cutoff: 'after cutoff',
-  after_deduplication: 'after dedup',
-  selected_count: 'selected',
-  cutoff: 'cutoff',
-  query_count: 'queries',
-  tool_calls: 'tool calls',
+  dimensions: '维度',
+  candidate_count: '候选项',
+  requested_candidates: '请求候选项',
+  ranked_count: '已排序',
+  after_cutoff: '筛选后',
+  after_deduplication: '去重后',
+  selected_count: '已选项',
+  cutoff: '阈值',
+  query_count: '查询',
+  tool_calls: '工具调用',
 };
 
 const NativeDetails: React.FC<{
@@ -102,10 +102,22 @@ const StateDot: React.FC<{ state: ActivityItem['state'] }> = ({ state }) => (
 
 const Narration: React.FC<{ activity: ActivityItem }> = ({ activity }) => (
   <div className="activity-narration">
-    {activity.agent && activity.agent !== 'MasterAgent' && (
-      <span className="activity-narration-agent">{activity.agent}</span>
-    )}
+    <span className="activity-narration-agent">
+      判断与下一步{activity.agent ? ` · ${activity.agent}` : ''}
+    </span>
     <ReactMarkdown remarkPlugins={[remarkGfm]}>{activity.content}</ReactMarkdown>
+  </div>
+);
+
+const Reasoning: React.FC<{ activity: ActivityItem }> = ({ activity }) => (
+  <div className={`activity-reasoning-stream ${activity.state}`}>
+    <div className="activity-reasoning-heading">
+      <StateDot state={activity.state} />
+      <span>正在分析</span>
+    </div>
+    <div className="activity-reasoning-text">
+      <span>正在分析问题并核对已有证据…</span>
+    </div>
   </div>
 );
 
@@ -145,8 +157,8 @@ const SearchGroup: React.FC<{ group: ActivityGroup }> = ({ group }) => (
   <details className={`activity-tool search-group ${group.state}`}>
     <summary>
       <StateDot state={group.state} />
-      <span className="activity-tool-name">Searched table metadata</span>
-      <span className="activity-group-count">{group.items.length} searches</span>
+      <span className="activity-tool-name">检索表元数据</span>
+      <span className="activity-group-count">{group.items.length} 次检索</span>
     </summary>
     <div className="activity-group-items">
       {group.items.map(item => (
@@ -165,13 +177,13 @@ const AgentActivity: React.FC<{
   allActivities: ActivityItem[];
 }> = ({ activity, children, allActivities }) => {
   const displayed = groupAgentActivities(children);
-  const actionCount = children.filter(child => child.kind !== 'narration').length;
+  const actionCount = children.filter(child => !['narration', 'reasoning'].includes(child.kind) && child.category !== 'reasoning').length;
   const skillCount = children.filter(child => child.kind === 'skill').length;
   const metricSummary = Object.entries(activity.metrics).map(formatMetric).filter(Boolean) as string[];
   const statusParts = [
     activity.summary,
-    actionCount > 0 ? `${actionCount} actions` : null,
-    skillCount > 0 ? `${skillCount} skills` : null,
+    actionCount > 0 ? `${actionCount} 项操作` : null,
+    skillCount > 0 ? `${skillCount} 项技能` : null,
     formatDuration(activity.durationMs) || null,
   ].filter(Boolean);
 
@@ -207,6 +219,9 @@ const ActivityNode: React.FC<{
   if (activity.kind === 'narration') {
     return <Narration activity={activity} />;
   }
+  if (activity.kind === 'reasoning') {
+    return <Reasoning activity={activity} />;
+  }
   if (activity.kind === 'agent') {
     return (
       <AgentActivity
@@ -224,7 +239,7 @@ export const ActivityPanel: React.FC<ActivityPanelProps> = ({ activities, comple
   const agentCount = activities.filter(
     activity => activity.kind === 'agent' && activity.category !== 'pipeline'
   ).length;
-  const actionCount = activities.filter(activity => !['agent', 'narration'].includes(activity.kind)).length;
+  const actionCount = activities.filter(activity => !['agent', 'narration', 'reasoning'].includes(activity.kind) && activity.category !== 'reasoning').length;
   const isRunning = activities.some(activity => activity.state === 'running');
 
   return (
@@ -240,9 +255,9 @@ export const ActivityPanel: React.FC<ActivityPanelProps> = ({ activities, comple
         <span className="thinking-title">
           {isRunning ? '正在工作' : '工作过程'}
           <span className="thinking-count">
-            {agentCount > 0 ? `${agentCount} ${agentCount === 1 ? 'agent' : 'agents'}` : ''}
+            {agentCount > 0 ? `${agentCount} 个智能体` : ''}
             {agentCount > 0 && actionCount > 0 ? ' · ' : ''}
-            {actionCount > 0 ? `${actionCount} actions` : ''}
+            {actionCount > 0 ? `${actionCount} 项操作` : ''}
           </span>
         </span>
       </summary>

@@ -16,7 +16,7 @@ from src.agents.data_insight_agent import (
 from src.agents.master_agent import MasterAgent
 from src.agents.metadata_agent import MetadataAgent
 from src.agents.ontology_agent import OntologyAgent
-from src.config import AzureOpenAIConfig, DatabricksConfig
+from src.config import DatabricksConfig, OpenAIConfig
 from src.prompts import (
     DATA_INSIGHT_AGENT_PROMPT,
     MASTER_AGENT_PROMPT,
@@ -335,7 +335,7 @@ def test_ontology_agent_uses_primary_deployment(monkeypatch) -> None:
 
     ontology_agent._create_agent([])
 
-    assert captured["model"] == AzureOpenAIConfig.GPT_DEPLOYMENT
+    assert captured["model"] == OpenAIConfig.MODEL
 
 
 def test_result_diagnostics_detects_degenerate_comparison_without_domain_rules() -> None:
@@ -491,16 +491,20 @@ async def test_data_insight_blocks_sql_until_dynamic_planning_skill_is_loaded(
 
     def run_query(sql: str, max_rows: int = 500):
         database_calls.append((sql, max_rows))
-        return {
-            "columns": ["value"],
-            "rows": [[1]],
-            "row_count": 1,
-            "sql": sql,
-        }
+        from src.data_sources.base import QueryResult
+
+        return QueryResult(
+            columns=["value"], rows=[[1]], row_count=1, sql=sql
+        )
+
+    class _Source:
+        name = "databricks"
+
+        execute_query = staticmethod(run_query)
 
     monkeypatch.setattr(
-        "src.agents.data_insight_agent._run_databricks_query",
-        run_query,
+        "src.agents.data_insight_agent.get_active_data_source",
+        lambda: _Source(),
     )
     agent = DataInsightAgent()
     execute_sql = {
@@ -585,16 +589,20 @@ async def test_governed_sql_requires_its_indexed_skill_resource(monkeypatch) -> 
 
     def run_query(sql: str, max_rows: int = 500):
         database_calls.append(sql)
-        return {
-            "columns": ["value"],
-            "rows": [[1]],
-            "row_count": 1,
-            "sql": sql,
-        }
+        from src.data_sources.base import QueryResult
+
+        return QueryResult(
+            columns=["value"], rows=[[1]], row_count=1, sql=sql
+        )
+
+    class _Source:
+        name = "databricks"
+
+        execute_query = staticmethod(run_query)
 
     monkeypatch.setattr(
-        "src.agents.data_insight_agent._run_databricks_query",
-        run_query,
+        "src.agents.data_insight_agent.get_active_data_source",
+        lambda: _Source(),
     )
     agent = DataInsightAgent()
     execute_sql = {
@@ -801,12 +809,12 @@ def test_deterministic_ontology_lookups_remain_visible_in_activity() -> None:
     ]
     by_name = {item["message"]: item for item in completed}
     assert set(by_name) == {
-        "Build ontology business context",
-        "List defined business classes",
+        "构建本体业务上下文",
+        "查看已定义业务类",
     }
-    assert "ProductCategory" in by_name["Build ontology business context"]["detail"]
-    assert "HighValueOrder" in by_name["List defined business classes"]["detail"]
-    assert by_name["Build ontology business context"]["metrics"][
+    assert "ProductCategory" in by_name["构建本体业务上下文"]["detail"]
+    assert "HighValueOrder" in by_name["查看已定义业务类"]["detail"]
+    assert by_name["构建本体业务上下文"]["metrics"][
         "semantic_property_count"
     ] == 1
 

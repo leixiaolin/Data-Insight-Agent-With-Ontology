@@ -47,6 +47,12 @@ def test_runtime_config_exposes_default_and_capability_status() -> None:
     assert "directory" not in result["ontology"]
 
 
+def test_health_exposes_backward_compatible_data_source_type() -> None:
+    result = asyncio.run(main.health_check())
+    assert result["data_source_type"] == main.DataSourceConfig.TYPE
+    assert result["data_source"]["type"] == main.DataSourceConfig.TYPE
+
+
 def test_same_session_question_and_ontology_mode_bypass_agents() -> None:
     original_initialized = main.state.initialized
     original_master = main.state.master_agent

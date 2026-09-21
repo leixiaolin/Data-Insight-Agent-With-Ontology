@@ -30,7 +30,7 @@ from pydantic import Field
 
 from ..config import (
     AgentReasoningConfig,
-    AzureOpenAIConfig,
+    OpenAIConfig,
     DatabricksConfig,
     DataSourcePolicyConfig,
 )
@@ -535,7 +535,7 @@ class MetadataAgent:
             tools=tools,
             reasoning_effort=AgentReasoningConfig.METADATA,
             context_providers=[skills_provider] if skills_provider else None,
-            model=AzureOpenAIConfig.SMALL_GPT_DEPLOYMENT,
+            model=OpenAIConfig.SMALL_MODEL,
             max_iterations=DatabricksConfig.METADATA_AGENT_MAX_MODEL_ROUNDTRIPS,
             max_function_calls=DatabricksConfig.METADATA_AGENT_MAX_FUNCTION_CALLS,
         )

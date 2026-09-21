@@ -7,10 +7,9 @@ Before starting, ensure you have:
 - ✅ Python 3.10 or higher installed
 - ✅ Node.js 18.18+ installed (for the React frontend)
 - ✅ Java 11+ installed (for optional HermiT startup reasoning)
-- ✅ Azure subscription with active resources
-- ✅ Azure OpenAI service with a primary tool-capable GPT deployment and a small Metadata deployment
+- ✅ OpenAI-compatible API key (DeepSeek by default)
 - ✅ (Optional) Azure Databricks workspace with Unity Catalog SQL Warehouse
-- ✅ Network access to all Azure services
+- ✅ Network access to the configured model and data services
 
 ## 🎯 5-Minute Setup
 
@@ -29,7 +28,7 @@ pip install -r requirements.txt
 cd frontend && npm install && cd ..
 ```
 
-### Step 2: Configure Azure Services
+### Step 2: Configure the LLM API
 
 1. **Copy environment template**:
    ```bash
@@ -45,26 +44,19 @@ cd frontend && npm install && cd ..
 
    | Variable | Description |
    |----------|-------------|
-   | `AZURE_OPENAI_ENDPOINT` | Azure OpenAI resource endpoint URL |
-   | `AZURE_OPENAI_AUTH_MODE` | `auto` \| `key` \| `aad` (default: `auto`) |
-   | `AZURE_OPENAI_API_KEY` | API key — required for `AUTH_MODE=key`; optional in `auto`, which otherwise uses AAD |
-   | `AZURE_OPENAI_GPT_DEPLOYMENT` | Primary deployment for Master, Ontology routing/recovery, and DataInsight |
-   | `AZURE_OPENAI_GPT_SMALL_DEPLOYMENT` | Smaller tool-capable deployment for Metadata discovery/verification |
+   | `OPENAI_BASE_URL` | OpenAI-compatible endpoint; defaults to `https://api.deepseek.com` |
+   | `OPENAI_API_KEY` | Provider API key (`DEEPSEEK_API_KEY` is also accepted) |
+   | `OPENAI_MODEL` | Primary tool-capable model for Master, Ontology, and DataInsight |
+   | `OPENAI_SMALL_MODEL` | Tool-capable model for Metadata discovery/verification |
 
-4. **Auth mode selection**:
+4. **DeepSeek defaults**:
 
-   - **API Key** (default if key is set):
-     ```
-     AZURE_OPENAI_AUTH_MODE=key
-     AZURE_OPENAI_API_KEY=<your-key>
-     ```
-   - **AAD / Entra ID** (when key-based auth is disabled on the resource):
-     ```
-     AZURE_OPENAI_AUTH_MODE=aad
-     # Leave AZURE_OPENAI_API_KEY blank or remove it
-     # Run 'az login' with an identity that has the
-     # "Cognitive Services OpenAI User" role on the resource
-     ```
+   ```env
+   OPENAI_BASE_URL=https://api.deepseek.com
+   OPENAI_API_KEY=<your-key>
+   OPENAI_MODEL=deepseek-v4-pro
+   OPENAI_SMALL_MODEL=deepseek-v4-flash
+   ```
 
 ### Step 3: Configure Ontology Runtime
 
@@ -177,13 +169,9 @@ Check `.env` has all required variables:
 grep -v '^#' .env | grep '=' | head -20
 ```
 
-### "Error code: 403 - AuthenticationTypeDisabled"
+### Model API authentication errors
 
-Key-based auth is disabled on your Azure OpenAI resource. Set:
-```
-AZURE_OPENAI_AUTH_MODE=aad
-```
-Then run `az login` and ensure your identity has the *Cognitive Services OpenAI User* role.
+Confirm `OPENAI_BASE_URL` points to your provider and that `OPENAI_API_KEY` (or `DEEPSEEK_API_KEY`) contains an active key. For DeepSeek, the default base URL is `https://api.deepseek.com`.
 
 ### DataInsight/Metadata tools report configuration errors
 
@@ -208,7 +196,7 @@ DATABRICKS_HOST, DATABRICKS_TOKEN, DATABRICKS_HTTP_PATH
 ## 🔐 Security Notes
 
 - Never commit `.env` to version control (it is in `.gitignore`)
-- Use `AZURE_OPENAI_AUTH_MODE=aad` with Managed Identity for production
+- Store `OPENAI_API_KEY` in a deployment secret store and rotate it regularly
 - Scope Databricks PAT tokens to minimum required permissions
 
 ## 📊 Monitoring
@@ -220,7 +208,8 @@ tail -f logs/application_$(date +%Y%m%d).log
 ## 🎓 Learning Resources
 
 - [Microsoft Agent Framework Documentation](https://learn.microsoft.com/en-us/agent-framework/)
-- [Azure OpenAI Service Documentation](https://learn.microsoft.com/en-us/azure/ai-services/openai/)
+- [OpenAI API Documentation](https://developers.openai.com/api/docs/)
+- [DeepSeek API Documentation](https://api-docs.deepseek.com/)
 - [Azure Databricks Unity Catalog](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/)
 
 ---

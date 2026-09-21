@@ -12,27 +12,26 @@ env_path = Path(__file__).parent.parent.parent / '.env'
 load_dotenv(dotenv_path=env_path, override=True)
 
 
-class AzureOpenAIConfig:
-    """Azure OpenAI service configuration."""
-    
-    ENDPOINT = os.getenv('AZURE_OPENAI_ENDPOINT')
-    API_KEY = os.getenv('AZURE_OPENAI_API_KEY')
-    AUTH_MODE = os.getenv('AZURE_OPENAI_AUTH_MODE', 'auto').strip().lower()  # auto | key | aad
-    API_VERSION = os.getenv('AZURE_OPENAI_API_VERSION', '2025-04-01-preview')
-    GPT_DEPLOYMENT = os.getenv('AZURE_OPENAI_GPT_DEPLOYMENT', 'gpt-5.1')
-    SMALL_GPT_DEPLOYMENT = (
-        os.getenv('AZURE_OPENAI_GPT_SMALL_DEPLOYMENT', GPT_DEPLOYMENT).strip()
-        or GPT_DEPLOYMENT
+class OpenAIConfig:
+    """OpenAI-compatible LLM configuration.
+
+    DeepSeek is the default provider. Any OpenAI-compatible endpoint can be
+    selected through environment variables without changing application code.
+    """
+
+    BASE_URL = os.getenv('OPENAI_BASE_URL', 'https://api.deepseek.com').rstrip('/')
+    API_KEY = (
+        os.getenv('OPENAI_API_KEY') or os.getenv('DEEPSEEK_API_KEY', '')
+    ).strip()
+    MODEL = os.getenv('OPENAI_MODEL', 'deepseek-v4-pro').strip() or 'deepseek-v4-pro'
+    SMALL_MODEL = (
+        os.getenv('OPENAI_SMALL_MODEL', 'deepseek-v4-flash').strip()
+        or MODEL
     )
 
     @classmethod
-    def use_api_key(cls) -> bool:
-        if cls.AUTH_MODE == 'key':
-            return True
-        if cls.AUTH_MODE == 'aad':
-            return False
-        # auto mode: keep backward compatibility
-        return bool(cls.API_KEY)
+    def is_configured(cls) -> bool:
+        return bool(cls.BASE_URL and cls.API_KEY and cls.MODEL and cls.SMALL_MODEL)
 
 
 _REASONING_EFFORTS = ('none', 'low', 'medium', 'high')
@@ -171,7 +170,7 @@ class MySQLConfig:
     @classmethod
     def is_configured(cls) -> bool:
         """Return True when the minimum required variables are present."""
-        return bool(cls.HOST and cls.USER and cls.DATABASES)
+        return bool(cls.HOST and cls.USER and cls.PASSWORD and cls.DATABASES)
 
 
 class DataSourcePolicyConfig:
@@ -283,11 +282,15 @@ def validate_config():
     """Validate that all required configuration values are set."""
     
     required_configs = {
-        'AZURE_OPENAI_ENDPOINT': AzureOpenAIConfig.ENDPOINT,
+        'OPENAI_BASE_URL': OpenAIConfig.BASE_URL,
     }
 
-    if AzureOpenAIConfig.use_api_key() and not AzureOpenAIConfig.API_KEY:
-        required_configs['AZURE_OPENAI_API_KEY'] = AzureOpenAIConfig.API_KEY
+    if not OpenAIConfig.API_KEY:
+        required_configs['OPENAI_API_KEY'] = OpenAIConfig.API_KEY
+    if not OpenAIConfig.MODEL:
+        required_configs['OPENAI_MODEL'] = OpenAIConfig.MODEL
+    if not OpenAIConfig.SMALL_MODEL:
+        required_configs['OPENAI_SMALL_MODEL'] = OpenAIConfig.SMALL_MODEL
 
     if DataSourceConfig.TYPE == 'mysql':
         if not MySQLConfig.is_configured():
@@ -295,6 +298,8 @@ def validate_config():
                 required_configs['MYSQL_HOST'] = ''
             if not MySQLConfig.USER:
                 required_configs['MYSQL_USER'] = ''
+            if not MySQLConfig.PASSWORD:
+                required_configs['MYSQL_PASSWORD'] = ''
             if not MySQLConfig.DATABASES:
                 required_configs['MYSQL_DATABASES'] = ''
     

@@ -4,7 +4,7 @@
 
 ### Overview
 
-The Ontology Data Agent uses a **multi-agent orchestration pattern** built on the Microsoft Agent Framework (MAF). The system combines read-only OWL business semantics (Owlready2) and structured data analytics (Azure Databricks Unity Catalog) through a MasterAgent plus three specialized agents, a plugin-based skill system, and a streaming FastAPI backend.
+The Ontology Data Agent uses a **multi-agent orchestration pattern** built on the Microsoft Agent Framework (MAF). The system combines read-only OWL business semantics (Owlready2) and structured data analytics from one configured backend—Azure Databricks or MySQL—through a MasterAgent plus three specialized agents, a plugin-based skill system, and a streaming FastAPI backend.
 
 ## 📊 Architecture Diagram
 
@@ -22,7 +22,7 @@ The Ontology Data Agent uses a **multi-agent orchestration pattern** built on th
                                │
                                ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                  MasterAgent  (primary GPT deployment)           │
+│                  MasterAgent  (primary LLM model)                │
 │  ┌──────────────────┐  ┌────────────────┐                        │
 │  │delegate_metadata │  │delegate_data   │  SkillsProvider scopes │
 │  │                  │  │_analysis       │  skills per sub-agent  │
@@ -33,7 +33,7 @@ The Ontology Data Agent uses a **multi-agent orchestration pattern** built on th
 ┌──────────────────────────────────────────────────────────────────┐
 │ Specialized agents                                               │
 │ OntologyAgent │ MetadataAgent │ DataInsightAgent                 │
-│ Owlready2     │ Unity Catalog │ Databricks SQL                   │
+│ Owlready2     │ Active source │ Read-only SQL                    │
 │                                                                  │
 │ Analytics: OntologyRouter? → OWL lookup → Metadata → DataInsight │
 │ Ontology failure: visible fallback → MetadataAgent → DataInsight │
@@ -42,17 +42,17 @@ The Ontology Data Agent uses a **multi-agent orchestration pattern** built on th
               ┌────────────────┴──────────────────┐
               ▼                                   ▼
     ┌──────────────────┐            ┌──────────────────────┐
-    │ Ontology/**/*.owl│            │ Databricks Unity     │
-    │ read-only local  │            │ Catalog + SQL        │
+    │ Ontology/**/*.owl│            │ Active data source   │
+    │ read-only local  │            │ Databricks or MySQL  │
     └──────────────────┘            └──────────────────────┘
                                │
                                ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                      Azure Services                              │
+│                      Model / evaluation services                │
 │  ┌───────────────────┐  ┌───────────────────────────────────┐    │
-│  │ Azure OpenAI      │  │  Azure AI Foundry                 │    │
-│  │ primary + small   │  │  Optional external evaluation     │    │
-│  │ GPT deployments   │  └───────────────────────────────────┘    │
+│  │ OpenAI-compatible │  │  Azure AI Foundry                 │    │
+│  │ API (DeepSeek by  │  │  Optional external evaluation     │    │
+│  │ default)          │  └───────────────────────────────────┘    │
 │  └───────────────────┘                                           │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -83,8 +83,8 @@ The Ontology Data Agent uses a **multi-agent orchestration pattern** built on th
 | `GET` | `/business-layer` | Read the workspace business semantic document |
 | `PUT` | `/business-layer` | Save the workspace business semantic document |
 | `GET` | `/skills` | List registered skills |
-| `GET` | `/config` | Non-sensitive runtime defaults and ontology capability status |
-| `GET` | `/health` | Health check |
+| `GET` | `/config` | Non-sensitive runtime, ontology, and active data-source status |
+| `GET` | `/health` | Health check, including `data_source_type` and source capability |
 
 **SSE event types** streamed to frontend:
 
@@ -114,19 +114,16 @@ The Ontology Data Agent uses a **multi-agent orchestration pattern** built on th
 
 **Framework**: MAF 1.11 `OpenAIChatCompletionClient.as_agent()` with in-memory `AgentSession`
 
-**Auth**: Controlled by `AzureOpenAIConfig.use_api_key()`:
-- `AZURE_OPENAI_AUTH_MODE=key` → API key
-- `AZURE_OPENAI_AUTH_MODE=aad` → `DefaultAzureCredential`
-- `AZURE_OPENAI_AUTH_MODE=auto` (default) → key if `AZURE_OPENAI_API_KEY` is set, else AAD
+**LLM connection**: `OpenAIConfig` supplies `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`, and `OPENAI_SMALL_MODEL` to MAF's `OpenAIChatCompletionClient`. DeepSeek is the default OpenAI-compatible endpoint; another compatible provider can be selected entirely through environment variables.
 
 **Tools registered**:
 
 | Tool | Description |
 |------|-------------|
-| `delegate_metadata` | Streams a Unity Catalog schema question to MetadataAgent |
+| `delegate_metadata` | Streams an active-source schema question to MetadataAgent |
 | `delegate_data_analysis` | Runs progressive Skill routing first in enabled mode; governed analytics can skip Metadata, while non-Skill requests use property-first Ontology → physical Metadata verification → DataInsight |
 
-**Input routing logic**: MasterAgent uses `MASTER_AGENT_PROMPT` to decide which tool to call. Questions requiring data analytics or schema discovery are delegated. Databricks Skills are advertised only inside their assigned sub-agents.
+**Input routing logic**: MasterAgent uses `MASTER_AGENT_PROMPT` to decide which tool to call. Questions requiring data analytics or schema discovery are delegated. Data Skills are advertised only inside their assigned sub-agents.
 
 **Agentic loop ownership**: A user turn invokes `MasterAgent` exactly once. Its MAF `OpenAIChatCompletionClient` owns the bounded function-invocation loop: it streams a model response, executes requested Agent/tools, appends each function result as an observation, and calls the model again. The loop exits when the model emits no further function call, reaches the configured model-roundtrip/function-call limit, or reaches the consecutive-error limit. There is no second answer judge, hidden feedback turn, or fixed 180-second MasterAgent timeout.
 
@@ -150,38 +147,40 @@ HermiT may reject ontology datatypes outside its OWL 2 datatype map. A reasoner 
 
 ### 5. DataInsightAgent (`src/agents/data_insight_agent.py`)
 
-**Backend**: Azure Databricks SQL Warehouse via `databricks-sql-connector`; Unity Catalog metadata is supplied by MetadataAgent.
+**Backend**: selected once per process by `DATA_SOURCE_TYPE` (default `databricks`). `src/data_sources/` exposes a common `DataSource` contract. Databricks uses `databricks-sql-connector`; MySQL uses SQLAlchemy Core with the PyMySQL driver and a bounded `QueuePool`.
 
 **Tools**:
 
 | Tool | Description |
 |------|-------------|
-| `execute_sql` | Runs a SQL query against the Databricks SQL Warehouse; returns rows as JSON |
+| `execute_sql` | Runs a read-only SQL query against the active data source; returns rows as JSON |
 | `recover_metadata_context` | Exceptional, once-per-request MetadataAgent recovery when the schema handoff is missing or incomplete |
 | `recover_ontology_context` | Exceptional, once-per-request OntologyAgent recovery when ontology was enabled but context is unexpectedly missing |
 | Native Skills | `SkillsProvider` advertises governed templates plus `sql-planning` on demand |
 
-**Configuration**: `DatabricksConfig` — `HOST`, `TOKEN`, `HTTP_PATH`, `CATALOG`, `SCHEMAS` (comma-separated list), `MAX_ROWS`, `QUERY_TIMEOUT`. The agent is instantiated at startup; its SQL tool returns a configuration error when `DatabricksConfig.is_configured()` is false.
+**Configuration**: `DataSourceConfig` selects the backend. `DataSourcePolicyConfig` owns source-neutral row, timeout, and metadata-cache limits. `DatabricksConfig` contains warehouse and Unity Catalog settings; `MySQLConfig` contains connection, database allowlist, character set, and pool settings. The agent is instantiated at startup and reports a source-specific configuration error when the selected backend is incomplete.
+
+Before execution, a dialect-aware `sqlglot` guard requires `catalog.schema.table` for Databricks or `database.table` for MySQL and rejects objects outside the configured allowlist. A keyword guard rejects data-definition and data-modification statements. MySQL connections additionally initialize as transaction read-only, and production deployments should use a database account granted only `SELECT`.
 
 ### 6. MetadataAgent (`src/agents/metadata_agent.py`)
 
-**Backend**: Azure Databricks Unity Catalog via `databricks-sdk`
+**Backend**: a `MetadataProvider` selected with the active data source. Databricks reads Unity Catalog through `databricks-sdk` with SQL fallback. MySQL uses parameterized `information_schema` queries on the same SQLAlchemy engine and connection pool as query execution.
 
 **Tools**:
 
 | Tool | Description |
 |------|-------------|
-| `list_schemas` | Lists all schemas in the configured Unity Catalog |
+| `list_schemas` | Lists configured schemas/databases that exist in the active source |
 | `list_tables` | Lists tables within a schema |
 | `get_table_details` | Returns column names, types, and comments for a table |
 | `search_tables` | Fuzzy-matches table names by keyword |
 | Native Skill | `SkillsProvider` advertises and loads `metadata-mapping` on demand |
 
-MetadataAgent remains necessary after adding OntologyAgent: ontology semantics identify business concepts and paths first, while Unity Catalog is the authority for executable table names, columns, keys, join cardinality, and availability. MasterAgent owns the canonical Ontology artifact and passes it directly to DataInsightAgent; MetadataAgent receives a bounded verification projection and cannot replace or discard the semantic context.
+MetadataAgent remains necessary after adding OntologyAgent: ontology semantics identify business concepts and paths first, while active-source metadata is authoritative for executable table names, columns, keys, join cardinality, and availability. MasterAgent owns the canonical Ontology artifact and passes it directly to DataInsightAgent; MetadataAgent receives a bounded verification projection and cannot replace or discard the semantic context.
 
 For analytics, code first lists cached table summaries (bounded by `METADATA_INDEX_MAX_TABLES`), scores them against the question and ontology terms, and batch-fetches up to `METADATA_CANDIDATE_MAX_TABLES` details with a bounded thread pool. Identifier-based join closure may add bridge tables. When recall finds nothing, schemas no larger than `METADATA_SNAPSHOT_MAX_TABLES` use a complete snapshot; larger schemas leave discovery to the MetadataAgent tools. The snapshot is a candidate subset, so the model can still call `search_tables` or `get_table_details` to close a named gap.
 
-MetadataAgent then performs one discovery/verification turn: ontology-disabled discovery progressively loads `metadata-mapping`; ontology-enabled verification has no Skill provider. It returns selected tables, verified joins, Skill-only business mappings, rejected candidates, and unresolved terms without copying raw columns. DataInsightAgent receives that decision JSON plus every authoritative raw UC payload. Process-local TTL caches are keyed by catalog, schema table list, and fully qualified table detail.
+MetadataAgent then performs one discovery/verification turn: ontology-disabled discovery progressively loads `metadata-mapping`; ontology-enabled verification has no Skill provider. It returns selected tables, verified joins, Skill-only business mappings, rejected candidates, and unresolved terms without copying raw columns. DataInsightAgent receives that decision JSON plus every authoritative raw metadata payload. Process-local TTL caches are keyed by catalog, schema table list, and fully qualified table detail.
 
 ### 7. Skill System
 
@@ -194,7 +193,7 @@ MAF applies progressive disclosure: advertise Skill metadata, load `SKILL.md` on
 | Skill | Purpose |
 |-------|---------|
 | `analytics-spec` | Governed highest-spending-customer SQL template and matching contract |
-| `sql-planning` | Dynamic planning and SQL engineering method for every non-governed query; uses OWL when available and verified UC in all modes |
+| `sql-planning` | Dynamic planning and SQL engineering method for every non-governed query; uses OWL when available and verified active-source metadata in all modes |
 | `metadata-mapping` | Unity Catalog metadata field mapping rules |
 
 ### 8. Business Semantic Layer (`src/business_layer.py`)
@@ -216,7 +215,7 @@ User Question (analytics intent detected)
 MasterAgent → delegate_data_analysis()
       ↓
 Ontology enabled for this session?
-  ├── No  → MetadataAgent resolves question-relevant UC objects
+  ├── No  → MetadataAgent resolves question-relevant physical objects
       └── Yes → OntologyAgent resolves role-neutral properties, restrictions, semantic paths, and lineage
               ├── success → MetadataAgent verifies the ontology-derived physical candidates
               └── failure → emit visible fallback, then run ordinary MetadataAgent lookup
@@ -231,7 +230,7 @@ DataInsightAgent.query_stream()
       ├── ordinary ontology route → load_skill("sql-planning")
       │      └── primary model dynamically selects metric, grain, comparisons, and SQL
       ├── recover_* only if an expected context handoff is missing/incomplete
-  ├── execute_sql(sql)              → Databricks SQL Warehouse
+  ├── execute_sql(sql)              → active Databricks/MySQL backend
   └── Stream results back
       ↓
 MasterAgent: relay thinking + text events to SSE queue
@@ -244,19 +243,30 @@ Frontend: render tabular / prose summary
 All configuration is centralized in `src/config/settings.py` and loaded from `.env`:
 
 ```
-AzureOpenAIConfig
-  ├── ENDPOINT, API_KEY, AUTH_MODE (auto|key|aad)
-  └── API_VERSION, GPT_DEPLOYMENT, SMALL_GPT_DEPLOYMENT
+OpenAIConfig
+  ├── BASE_URL, API_KEY
+  └── MODEL, SMALL_MODEL
 
 AzureAIFoundryConfig
   └── CONNECTION_STRING
 
+DataSourceConfig
+  └── TYPE = databricks | mysql
+
+DataSourcePolicyConfig
+  └── MAX_ROWS, QUERY_TIMEOUT, METADATA_CACHE_TTL_SECONDS
+
 DatabricksConfig
   ├── HOST, TOKEN, HTTP_PATH
   ├── CATALOG, SCHEMAS (comma-separated list)
-      ├── MAX_ROWS, QUERY_TIMEOUT, METADATA_CACHE_TTL_SECONDS
-      ├── METADATA_INDEX_MAX_TABLES, METADATA_CANDIDATE_MAX_TABLES
-      ├── METADATA_SNAPSHOT_MAX_TABLES
+  ├── METADATA_INDEX_MAX_TABLES, METADATA_CANDIDATE_MAX_TABLES
+  ├── METADATA_SNAPSHOT_MAX_TABLES
+  └── is_configured() → bool
+
+MySQLConfig
+  ├── HOST, PORT, USER, PASSWORD, CHARSET
+  ├── DATABASES (allowlist; first entry is default)
+  ├── POOL_SIZE, POOL_MAX_OVERFLOW, POOL_RECYCLE_SECONDS
   └── is_configured() → bool
 
 OntologyConfig
@@ -271,24 +281,20 @@ AppConfig
   └── LOG_DIR, TMP_DIR, DATA_DIR
 ```
 
-`validate_config()` raises `ValueError` for missing required variables; `AZURE_OPENAI_API_KEY` is only required when `use_api_key()` returns `True`.
+`validate_config()` raises `ValueError` when the OpenAI-compatible base URL, API key, or model names are missing.
 
 ## 🔒 Security Architecture
 
-### Authentication
+### LLM Authentication
 
-```
-AZURE_OPENAI_AUTH_MODE = key   →  API Key (from .env)
-AZURE_OPENAI_AUTH_MODE = aad   →  DefaultAzureCredential (Entra ID)
-AZURE_OPENAI_AUTH_MODE = auto  →  key if API_KEY set, else AAD
-```
-
-For AAD mode, the running identity needs the *Cognitive Services OpenAI User* role on the Azure OpenAI resource.
+The configured OpenAI-compatible endpoint uses a bearer API key from `OPENAI_API_KEY`; `DEEPSEEK_API_KEY` is accepted as a DeepSeek-specific fallback alias. Keys remain in the ignored local `.env` or deployment secret store.
 
 ### Best Practices
 - All secrets in `.env` only (`.gitignore`-d)
 - No credentials in source code or logs
 - Databricks PAT scoped by Unity Catalog RBAC
+- MySQL account restricted to `SELECT` on allowlisted databases; application sessions are transaction read-only
+- SQL parsing, single-statement enforcement, fully qualified names, and source-specific allowlists are enforced before execution
 
 ## 📊 Monitoring & Observability
 
@@ -323,8 +329,8 @@ For AAD mode, the running identity needs the *Cognitive Services OpenAI User* ro
 2. **Streaming-first**: User-visible progress and answers flow through SSE; delegated workers use bounded waits and cooperative cancellation
 3. **Configurable auth**: `AUTH_MODE` supports both API key and AAD without code changes
 4. **Skill injection**: Domain expertise is externalized to `skills/` Markdown files
-5. **Separate authority boundaries**: OWL semantics propose, verified Unity Catalog metadata decides
-6. **Progressive enhancement**: DataInsight and Metadata agents are optional; system works without Databricks
+5. **Separate authority boundaries**: OWL semantics propose, verified active-source metadata decides
+6. **Pluggable data layer**: Databricks remains the backward-compatible default; MySQL is selected entirely through configuration
 
 ---
 

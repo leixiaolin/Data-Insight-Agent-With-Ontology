@@ -29,7 +29,7 @@ __all__ = [
 
 _active_source: Optional[DataSource] = None
 _active_provider: Optional[MetadataProvider] = None
-_factory_lock = threading.Lock()
+_factory_lock = threading.RLock()
 
 
 def _resolve_type() -> str:
@@ -65,14 +65,22 @@ def get_active_metadata_provider() -> MetadataProvider:
     global _active_provider
     with _factory_lock:
         if _active_provider is None:
+            # The provider and query executor must share the same DataSource instance.
+            # In MySQL mode this means one SQLAlchemy Engine/QueuePool per process;
+            # in Databricks mode it keeps metadata recovery on the active executor.
+            source = get_active_data_source()
             if _resolve_type() == "mysql":
-                from .mysql import MySQLMetadataProvider
+                from .mysql import MySQLDataSource, MySQLMetadataProvider
 
-                _active_provider = MySQLMetadataProvider()
+                if not isinstance(source, MySQLDataSource):
+                    raise RuntimeError("Active data source/provider type mismatch for MySQL")
+                _active_provider = MySQLMetadataProvider(data_source=source)
             else:
-                from .databricks import DatabricksMetadataProvider
+                from .databricks import DatabricksDataSource, DatabricksMetadataProvider
 
-                _active_provider = DatabricksMetadataProvider()
+                if not isinstance(source, DatabricksDataSource):
+                    raise RuntimeError("Active data source/provider type mismatch for Databricks")
+                _active_provider = DatabricksMetadataProvider(data_source=source)
         return _active_provider
 
 

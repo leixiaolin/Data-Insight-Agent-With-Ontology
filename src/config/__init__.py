@@ -2,7 +2,7 @@
 
 from .settings import (
     AgentReasoningConfig,
-    AzureOpenAIConfig,
+    OpenAIConfig,
     AzureAIFoundryConfig,
     DatabricksConfig,
     DataSourceConfig,
@@ -15,7 +15,7 @@ from .settings import (
 
 __all__ = [
     'AgentReasoningConfig',
-    'AzureOpenAIConfig',
+    'OpenAIConfig',
     'AzureAIFoundryConfig',
     'DatabricksConfig',
     'DataSourceConfig',

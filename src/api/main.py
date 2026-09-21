@@ -577,21 +577,7 @@ async def _stream_agent_response(
                 continue
 
             if ct == "text_reasoning":
-                reasoning_text = (getattr(content, "text", "") or "").strip()
-                if reasoning_text:
-                    events.append(
-                        _sse(
-                            {
-                                "type": "thinking",
-                                "id": "model-reasoning",
-                                "kind": "reasoning",
-                                "state": "running",
-                                "agent": "MasterAgent",
-                                "message": reasoning_text,
-                                "append": True,
-                            }
-                        )
-                    )
+                # Do not expose the provider's raw chain-of-thought in SSE.
                 continue
 
             if ct == "function_call":
@@ -792,6 +778,7 @@ async def health_check():
         "init_error": state.init_error,
         "active_threads": len(state.threads),
         "ontology": _public_ontology_health(),
+        "data_source_type": DataSourceConfig.TYPE,
         "data_source": _public_data_source_health(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

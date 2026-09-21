@@ -9,11 +9,11 @@ This guide covers deploying the Ontology Data Agent to production. The system co
 
 ## 📋 Pre-Deployment Checklist
 
-### Azure Resources
-- [ ] Azure OpenAI resource with a primary tool-capable GPT deployment and a small Metadata deployment
+### External Resources
+- [ ] OpenAI-compatible model API with primary and Metadata tool-capable models (DeepSeek by default)
 - [ ] External log/evaluation destination if required (not wired by this repository)
 - [ ] Azure Databricks workspace with Unity Catalog SQL Warehouse (optional, for DataInsight)
-- [ ] Auth decision: API key (`AZURE_OPENAI_AUTH_MODE=key`) or Managed Identity (`aad`)
+- [ ] Model API key stored in the deployment platform's secret store
 
 ### Application
 - [ ] `.env` configured with all required production values
@@ -61,10 +61,10 @@ az webapp config appsettings set \
   --resource-group <your-rg> \
   --name <your-app-name> \
   --settings \
-    AZURE_OPENAI_ENDPOINT="<value>" \
-    AZURE_OPENAI_AUTH_MODE="aad" \
-    AZURE_OPENAI_GPT_DEPLOYMENT="<primary-deployment>" \
-    AZURE_OPENAI_GPT_SMALL_DEPLOYMENT="<small-deployment>" \
+    OPENAI_BASE_URL="https://api.deepseek.com" \
+    OPENAI_API_KEY="<secret>" \
+    OPENAI_MODEL="deepseek-v4-pro" \
+    OPENAI_SMALL_MODEL="deepseek-v4-flash" \
     DATABRICKS_HOST="<value>" \
     DATABRICKS_TOKEN="<value>" \
     DATABRICKS_HTTP_PATH="<value>" \
@@ -163,8 +163,9 @@ az containerapp create \
   --target-port 8000 \
   --ingress external \
   --env-vars \
-    AZURE_OPENAI_ENDPOINT="<value>" \
-    AZURE_OPENAI_AUTH_MODE="aad"
+    OPENAI_BASE_URL="https://api.deepseek.com" \
+    OPENAI_MODEL="deepseek-v4-pro" \
+    OPENAI_SMALL_MODEL="deepseek-v4-flash"
   # Add the remaining non-secret settings and use Container Apps secrets/secretref
   # for API keys, SAS tokens, and Databricks credentials.
 
@@ -184,31 +185,9 @@ browser bundle.
 
 ## 🔐 Security Hardening
 
-### Use Managed Identity (Recommended for Production)
+### Model API Key Security
 
-Set `AZURE_OPENAI_AUTH_MODE=aad` and assign the *Cognitive Services OpenAI User* role to the App Service / Container App managed identity:
-
-```bash
-# Get the app's principal ID
-PRINCIPAL=$(az webapp identity assign \
-  --resource-group <your-rg> \
-  --name <your-app-name> \
-  --query principalId -o tsv)
-
-# Get the AOAI resource ID
-AOAI_ID=$(az cognitiveservices account show \
-  --resource-group <aoai-rg> \
-  --name <aoai-name> \
-  --query id -o tsv)
-
-# Assign role
-az role assignment create \
-  --assignee "$PRINCIPAL" \
-  --role "Cognitive Services OpenAI User" \
-  --scope "$AOAI_ID"
-```
-
-No API key is needed in `.env` when using this approach.
+Store `OPENAI_API_KEY` as an App Service or Container Apps secret, expose it only to the backend, and rotate it regularly. Never compile it into the frontend image or commit it to `.env` templates.
 
 ### Databricks Token Security
 
@@ -221,10 +200,10 @@ az webapp config appsettings set \
   --settings DATABRICKS_TOKEN="<new-token>"
 ```
 
-### Enable Azure Private Link
+### Restrict Network Egress
 
-- Configure Private Endpoints for Azure OpenAI
-- Deploy the App Service / Container App inside a VNet with service endpoints
+- Allow outbound traffic only to the configured model endpoint and required data services
+- Deploy the App Service / Container App inside a VNet when the data source requires private connectivity
 
 ## 📊 Monitoring Setup
 
@@ -239,7 +218,7 @@ instrument the application with Azure Monitor OpenTelemetry before claiming live
 Configure alerts for:
 - Backend HTTP error rate > 5%
 - Response latency P95 > 10s
-- Azure OpenAI throttling (429 responses)
+- Model API throttling (429 responses)
 - Databricks query timeout rate
 
 ## 🔄 CI/CD Pipeline (GitHub Actions)
@@ -326,9 +305,9 @@ curl -N -X POST https://<your-backend>/chat/stream \
 ### Environment-Specific Configs
 
 Use App Service deployment slots or separate resources per environment:
-- `dev` — development (key-based auth OK)
-- `staging` — pre-production (AAD auth, representative data)
-- `prod` — production (AAD auth, Managed Identity, Private Link)
+- `dev` — development with a separate low-privilege API key
+- `staging` — pre-production with a separate key and representative data
+- `prod` — production with a secret-store-managed key and restricted network egress
 
 ## 📝 Post-Deployment Tasks
 
@@ -342,7 +321,7 @@ Use App Service deployment slots or separate resources per environment:
 
 **Backend not starting** — Check startup command, verify all required env vars are set, review App Service logs.
 
-**403 AuthenticationTypeDisabled** — Switch to `AZURE_OPENAI_AUTH_MODE=aad` and assign the correct role to the Managed Identity.
+**401/403 from the model API** — Verify `OPENAI_BASE_URL`, rotate `OPENAI_API_KEY`, and confirm the selected model is enabled for the account.
 
 **DataInsight tools report configuration errors** — Verify `DATABRICKS_HOST`, `DATABRICKS_TOKEN`, and `DATABRICKS_HTTP_PATH`; then check that the SQL warehouse is running.
 

@@ -8,7 +8,7 @@ from agent_framework import SkillsSourceContext
 from src.agents.data_insight_agent import DataInsightAgent
 from src.agents.metadata_agent import MetadataAgent
 from src.agents.ontology_agent import OntologyAgent
-from src.config import AzureOpenAIConfig
+from src.config import OpenAIConfig
 from src.ontology import OntologyService
 from src.skills_provider import (
     begin_skill_usage_tracking,
@@ -36,10 +36,10 @@ def test_agent_scoped_native_skills() -> None:
                 "sql-planning",
             }
             assert len(metadata_agent.verifier_agent.context_providers) == 0
-            assert metadata_agent.agent.client.model == AzureOpenAIConfig.SMALL_GPT_DEPLOYMENT
-            assert metadata_agent.verifier_agent.client.model == AzureOpenAIConfig.SMALL_GPT_DEPLOYMENT
-            assert ontology_agent.agent.client.model == AzureOpenAIConfig.GPT_DEPLOYMENT
-            assert data_agent.agent.client.model == AzureOpenAIConfig.GPT_DEPLOYMENT
+            assert metadata_agent.agent.client.model == OpenAIConfig.SMALL_MODEL
+            assert metadata_agent.verifier_agent.client.model == OpenAIConfig.SMALL_MODEL
+            assert ontology_agent.agent.client.model == OpenAIConfig.MODEL
+            assert data_agent.agent.client.model == OpenAIConfig.MODEL
 
             # Ontology Skill routing runs on the tool-free router; the tool-using agent
             # is only the recovery stage and must not re-run routing.

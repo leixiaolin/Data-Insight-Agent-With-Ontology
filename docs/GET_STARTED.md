@@ -19,7 +19,7 @@
 | **DataInsightAgent** | Databricks Unity Catalog SQL analytics | `execute_sql`; bounded context recovery; governed template Skills plus native `sql-planning` |
 | **MetadataAgent** | Unity Catalog candidate recall and physical verification | deterministic table-summary recall and batch detail fetch; UC tools for gap recovery; native `metadata-mapping` Skill in discovery mode |
 
-Agents use Azure OpenAI through Microsoft Agent Framework and `OpenAIChatCompletionClient`: Master, Ontology routing/recovery, and DataInsight use the primary deployment; Metadata discovery/verification uses the configured small deployment.
+Agents use an OpenAI-compatible API through Microsoft Agent Framework and `OpenAIChatCompletionClient`: Master, Ontology routing/recovery, and DataInsight use `OPENAI_MODEL`; Metadata discovery/verification uses `OPENAI_SMALL_MODEL`. DeepSeek is the default provider.
 
 ### 🔌 Skill System
 
@@ -72,7 +72,7 @@ run.sh                        # Launcher script
 ### 🏗️ Enterprise Features
 
 - ✅ **Streaming responses** — SSE with activity, text, reset, completion, stop, and error events
-- ✅ **AUTH_MODE** — `auto | key | aad` controls API key vs. AAD/`DefaultAzureCredential` auth
+- ✅ **Provider-neutral LLM configuration** — switch OpenAI-compatible endpoints and model names through environment variables
 - ✅ **Optional Databricks capability** — the application starts without Databricks, while UC/SQL tools report configuration errors if invoked
 - ✅ **Ontology-guided SQL** — session-selectable role-neutral OWL properties, restrictions, lineage, and semantic paths before UC verification and model-driven planning
 - ✅ **Visible fallback** — Ontology failures are shown in the thinking panel before standard metadata-driven analysis continues
@@ -91,16 +91,15 @@ run.sh                        # Launcher script
 ### Step 2: Configure Environment
 ```bash
 cp .env.example .env
-nano .env   # Fill in your Azure credentials
+nano .env   # Fill in your model and data-source credentials
 ```
 
 Minimum required:
 ```
-AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-AZURE_OPENAI_AUTH_MODE=aad          # or: key (if key-based auth is enabled)
-AZURE_OPENAI_API_KEY=               # required only when AUTH_MODE=key
-AZURE_OPENAI_GPT_DEPLOYMENT=<primary-deployment>
-AZURE_OPENAI_GPT_SMALL_DEPLOYMENT=<small-tool-capable-deployment>
+OPENAI_BASE_URL=https://api.deepseek.com
+OPENAI_API_KEY=<your-key>
+OPENAI_MODEL=deepseek-v4-pro
+OPENAI_SMALL_MODEL=deepseek-v4-flash
 ```
 
 ### Step 3: Run
@@ -112,13 +111,9 @@ AZURE_OPENAI_GPT_SMALL_DEPLOYMENT=<small-tool-capable-deployment>
 
 ## 🔑 Key Configuration Details
 
-### Authentication (`AZURE_OPENAI_AUTH_MODE`)
+### LLM provider
 
-| Value | Behaviour |
-|-------|-----------|
-| `key` | Uses `AZURE_OPENAI_API_KEY` (fails if key-based auth disabled on resource) |
-| `aad` | Uses `DefaultAzureCredential` (requires `az login` + *Cognitive Services OpenAI User* role) |
-| `auto` | Uses key if `AZURE_OPENAI_API_KEY` is set, otherwise AAD |
+`OPENAI_BASE_URL` selects any OpenAI-compatible endpoint. Authentication uses `OPENAI_API_KEY`; for DeepSeek, `DEEPSEEK_API_KEY` is accepted as a fallback alias. The two model variables let Metadata use a faster model independently from the primary analysis path.
 
 ### Feature Flags
 
@@ -148,7 +143,7 @@ DATABRICKS_SCHEMAS=silver  # Add comma-separated schemas only when they actually
 ```
 User Question
        ↓
-MasterAgent (primary GPT deployment, main AgentSession + bounded agentic loop)
+MasterAgent (`OPENAI_MODEL`, main AgentSession + bounded agentic loop)
        ↓
   Data?    → delegate_data_analysis
                       Ontology on? → OntologyRouter progressively matches governed Skills
@@ -199,7 +194,7 @@ curl http://localhost:8000/config
 ## 🔐 Security Checklist
 
 - ✅ API credentials stored in `.env` only (git-ignored)
-- ✅ `AZURE_OPENAI_AUTH_MODE=aad` supported for keyless auth
+- ✅ OpenAI-compatible DeepSeek endpoint and tool-capable models supported
 - ✅ No hardcoded secrets in source code
 - 🔲 **Production**: Use Managed Identity (`aad` mode) + Private Link
 - 🔲 **Production**: Add user authentication layer in front of the React app
@@ -210,7 +205,7 @@ curl http://localhost:8000/config
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `403 AuthenticationTypeDisabled` | Key auth disabled on AOAI resource | Set `AZURE_OPENAI_AUTH_MODE=aad`, run `az login` |
+| `401` / `403` from model API | Invalid, expired, or unauthorized provider key | Check `OPENAI_BASE_URL` and rotate `OPENAI_API_KEY` |
 | DataInsight/Metadata tool configuration error | Databricks not configured | Set required `DATABRICKS_*` variables |
 | Frontend can't reach backend | CORS or wrong URL | Check `src/api/main.py` CORS origins; frontend uses port 8000 |
 

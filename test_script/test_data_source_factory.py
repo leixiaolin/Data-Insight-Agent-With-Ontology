@@ -48,9 +48,29 @@ def test_mysql_type_constructs_mysql_source() -> None:
     assert rules.schemas == list(MySQLConfig.DATABASES)
 
 
+def test_mysql_configuration_requires_password() -> None:
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(MySQLConfig, "HOST", "localhost")
+        patch.setattr(MySQLConfig, "USER", "reader")
+        patch.setattr(MySQLConfig, "PASSWORD", "")
+        patch.setattr(MySQLConfig, "DATABASES", ["sales"])
+        assert MySQLConfig.is_configured() is False
+        patch.setattr(MySQLConfig, "PASSWORD", "secret")
+        assert MySQLConfig.is_configured() is True
+
+
 def test_factory_returns_process_wide_singletons() -> None:
     assert ds.get_active_data_source() is ds.get_active_data_source()
     assert ds.get_active_metadata_provider() is ds.get_active_metadata_provider()
+
+
+def test_mysql_provider_reuses_active_source_and_engine_owner() -> None:
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(DataSourceConfig, "RAW_TYPE", "mysql")
+        patch.setattr(DataSourceConfig, "TYPE", "mysql")
+        source = ds.get_active_data_source()
+        provider = ds.get_active_metadata_provider()
+    assert provider._data_source is source
 
 
 def test_query_result_shape_matches_historical_contract() -> None:

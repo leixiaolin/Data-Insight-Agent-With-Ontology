@@ -372,7 +372,7 @@ class MasterAgent:
                 )
                 activity["state"] = "completed"
                 activity["detail"] = (
-                    f"recalled {len(selected)} of {result.get('table_count', len(selected))}: "
+                    f"从 {result.get('table_count', len(selected))} 张候选表中选出 {len(selected)} 张："
                     + ", ".join(selected)
                 )
                 activity["metadata"] = {
@@ -398,6 +398,7 @@ class MasterAgent:
             pending_args = ""
             pending_call_id = ""
             started_calls: Dict[str, tuple[str, str, float]] = {}
+            reasoning_activity_id: Optional[str] = None
 
             def tool_result_failed(name: str, result: Any, exception: Any) -> bool:
                 if exception:
@@ -466,21 +467,25 @@ class MasterAgent:
                     for content in update.contents:
                         content_type = getattr(content, "type", None)
                         if content_type == "text_reasoning":
-                            reasoning_text = (getattr(content, "text", "") or "").strip()
-                            if reasoning_text:
+                            # Provider reasoning is private and can be in a different
+                            # language from the user's question. Show a bounded status,
+                            # never the raw reasoning text.
+                            if reasoning_activity_id is None:
+                                reasoning_activity_id = new_activity_id("reasoning")
                                 push_stream_event(
                                     "activity",
                                     {
-                                        "id": new_activity_id("reasoning"),
-                                        "kind": "reasoning",
+                                        "id": reasoning_activity_id,
+                                        "kind": "status",
                                         "category": "reasoning",
-                                        "state": "completed",
+                                        "state": "running",
                                         "agent": agent,
                                         "parent_id": parent_id,
-                                        "message": reasoning_text,
+                                        "message": "正在分析问题并核对已有证据…",
                                     },
                                 )
                         elif content_type == "function_call":
+                            reasoning_activity_id = None
                             name = getattr(content, "name", "") or ""
                             arguments = getattr(content, "arguments", "") or ""
                             if name and name != pending_name:
@@ -498,6 +503,7 @@ class MasterAgent:
                                 except json.JSONDecodeError:
                                     pass
                         elif content_type == "function_result":
+                            reasoning_activity_id = None
                             flush_pending()
                             call_id = getattr(content, "call_id", "") or ""
                             call_info = started_calls.get(call_id)
@@ -573,7 +579,7 @@ class MasterAgent:
                     "delegate_metadata",
                     success=False,
                     retryable=False,
-                    summary="MetadataAgent is not available",
+                    summary="MetadataAgent 当前不可用",
                     started_at=tool_started_at,
                 )
                 return "MetadataAgent is not available. Please ensure it is initialised."
@@ -737,14 +743,13 @@ class MasterAgent:
                 summary=(
                     (
                         (
-                            "Step 2 completed: MetadataAgent verified ontology hints "
-                            "against Unity Catalog"
+                            "第 2 步完成：MetadataAgent 已核对本体线索与物理表结构"
                         )
                         if ontology_context
-                        else "Step 1 completed: MetadataAgent resolved UC schema context"
+                        else "第 1 步完成：MetadataAgent 已确认物理表结构"
                     )
                     + (
-                        "; selected "
+                        "；已选择 "
                         + ", ".join(name.rsplit(".", 1)[-1] for name in selected_tables)
                         if selected_tables
                         else ""
@@ -763,7 +768,7 @@ class MasterAgent:
             self._record_tool_outcome(
                 "delegate_metadata",
                 success=True,
-                summary="Authoritative Unity Catalog schema context prepared",
+                summary="已准备经过验证的物理表结构",
                 metadata={
                     "result_chars": len(metadata_result),
                     "tool_result_count": len(tool_results),
@@ -990,7 +995,7 @@ class MasterAgent:
                     "OntologyAgent",
                     question,
                     agent_started_at,
-                    summary="Governed analytics Skill matched; ontology lookup skipped",
+                    summary="已匹配受控分析技能，跳过本体检索",
                     metrics={
                         "skill_fast_path": True,
                         "skill_name": skill_name,
@@ -1000,7 +1005,7 @@ class MasterAgent:
                 self._record_tool_outcome(
                     "ontology_context",
                     success=True,
-                    summary="Governed analytics Skill route prepared",
+                    summary="已准备受控分析技能路径",
                     metadata={"skill_name": skill_name},
                     started_at=tool_started_at,
                 )
@@ -1035,7 +1040,7 @@ class MasterAgent:
                 "OntologyAgent",
                 question,
                 agent_started_at,
-                summary="Step 1 completed: ontology business context prepared",
+                summary="第 1 步完成：已准备本体业务上下文",
                 metrics={
                     "result_chars": len(normalized_result),
                     "tool_result_count": len(result_container["tool_results"]),
@@ -1050,7 +1055,7 @@ class MasterAgent:
             self._record_tool_outcome(
                 "ontology_context",
                 success=True,
-                summary="Ontology business context prepared",
+                summary="已准备本体业务上下文",
                 metadata={"result_chars": len(normalized_result)},
                 started_at=tool_started_at,
             )
@@ -1100,7 +1105,7 @@ class MasterAgent:
                     "data_insight",
                     success=False,
                     retryable=False,
-                    summary="DataInsightAgent is not available",
+                    summary="DataInsightAgent 当前不可用",
                     started_at=tool_started_at,
                 )
                 return "DataInsightAgent is not available. Please ensure it is initialised."
@@ -1181,12 +1186,12 @@ class MasterAgent:
                     question,
                     agent_started_at,
                     error=True,
-                    summary="Data analysis timed out",
+                    summary="数据分析超时",
                 )
                 self._record_tool_outcome(
                     "data_insight",
                     success=False,
-                    summary="Data analysis timed out",
+                    summary="数据分析超时",
                     started_at=tool_started_at,
                 )
                 return "DataInsight query timed out (180 s)."
@@ -1215,12 +1220,12 @@ class MasterAgent:
                     question,
                     agent_started_at,
                     error=True,
-                    summary="No analysis result returned",
+                    summary="未返回分析结果",
                 )
                 self._record_tool_outcome(
                     "data_insight",
                     success=False,
-                    summary="DataInsightAgent returned no results",
+                    summary="DataInsightAgent 未返回结果",
                     started_at=tool_started_at,
                 )
                 return "DataInsightAgent returned no results."
@@ -1230,12 +1235,12 @@ class MasterAgent:
                 "DataInsightAgent",
                 question,
                 agent_started_at,
-                summary="Final step completed: SQL analysis completed",
+                summary="最后一步完成：SQL 分析已结束",
             )
             self._record_tool_outcome(
                 "data_insight",
                 success=True,
-                summary="DataInsightAgent completed the analysis",
+                summary="DataInsightAgent 已完成分析",
                 metadata={"result_chars": len(result)},
                 started_at=tool_started_at,
             )
@@ -1299,7 +1304,7 @@ class MasterAgent:
                                 question,
                                 state="error",
                                 duration_ms=round((time.perf_counter() - tool_started_at) * 1000),
-                                summary="Stopped by user after OntologyAgent",
+                                summary="用户在 OntologyAgent 阶段后停止任务",
                             ),
                         )
                         return "Data-analysis pipeline cancelled by user."
@@ -1348,7 +1353,7 @@ class MasterAgent:
                             question,
                             state="error",
                             duration_ms=round((time.perf_counter() - tool_started_at) * 1000),
-                            summary="Stopped by user after MetadataAgent",
+                            summary="用户在 MetadataAgent 阶段后停止任务",
                         ),
                     )
                     return "Data-analysis pipeline cancelled by user."
@@ -1400,7 +1405,7 @@ class MasterAgent:
                 self._record_tool_outcome(
                     "delegate_data_analysis",
                     success=success,
-                    summary=("Data-analysis pipeline completed" if success else result),
+                    summary=("数据分析流程已完成" if success else result),
                     metadata=pipeline_metadata,
                     started_at=tool_started_at,
                 )

@@ -1,6 +1,6 @@
 # Ontology Data Agent
 
-An intelligent, enterprise-grade data analytics system powered by Azure OpenAI, Microsoft Agent Framework (MAF), an OWL business ontology, and Azure Databricks. Designed for business-language analytical questions over governed Unity Catalog data.
+An intelligent, enterprise-grade data analytics system powered by an OpenAI-compatible LLM API (DeepSeek by default), Microsoft Agent Framework (MAF), an OWL business ontology, and a configurable Databricks or MySQL data source.
 
 ## 🌟 Features
 
@@ -19,7 +19,7 @@ An intelligent, enterprise-grade data analytics system powered by Azure OpenAI, 
 - **Streaming SSE Responses**: FastAPI streams `thinking`, `text`, `answer_reset`, `thinking_done`, `stopped`, `done`, and `error`
 
 ### Technology Stack
-- **LLM routing**: Primary Azure OpenAI deployment for Master, Ontology routing/recovery, and DataInsight; `AZURE_OPENAI_GPT_SMALL_DEPLOYMENT` for Metadata discovery/verification
+- **LLM routing**: `OPENAI_MODEL` for Master, Ontology routing/recovery, and DataInsight; `OPENAI_SMALL_MODEL` for Metadata discovery/verification. Defaults: DeepSeek V4 Pro and V4 Flash
 - **Agent Framework**: Microsoft Agent Framework 1.11 — `OpenAIChatCompletionClient`
 - **Primary Frontend**: React + TypeScript (Vite, port 3000)
 - **Backend API**: FastAPI with Server-Sent Events (port 8000)
@@ -51,7 +51,7 @@ flowchart TD
         FS --> SP
     end
 
-    subgraph AgentLayer["Agent Layer — Microsoft Agent Framework · Azure OpenAI"]
+    subgraph AgentLayer["Agent Layer — Microsoft Agent Framework · OpenAI-compatible API"]
         MA(["🧠 MasterAgent\nBounded agentic loop"])
         OA(["OntologyRouter + OntologyAgent"])
         DIA(["📊 DataInsightAgent"])
@@ -59,8 +59,8 @@ flowchart TD
         MA --> OA & DIA & META
     end
 
-    subgraph AzureServices["Azure Services"]
-        AOAI["☁️ Azure OpenAI\nprimary + small GPT deployments"]
+    subgraph ModelServices["Model Services"]
+        AOAI["☁️ DeepSeek / OpenAI-compatible API\nprimary + small models"]
         AIF["Azure AI Foundry\nOptional external evaluation"]
     end
 
@@ -109,7 +109,7 @@ Data-Insight-Agent-With-Ontology/
 │   ├── prompts/                 # Per-agent system prompts:
 │   │   └── master.py · ontology.py · data_insight.py · metadata.py
 │   ├── config/
-│   │   └── settings.py          # AzureOpenAIConfig, AzureAIFoundryConfig,
+│   │   └── settings.py          # OpenAIConfig, AzureAIFoundryConfig,
 │   │                            #   DatabricksConfig, OntologyConfig, AppConfig
 │   ├── skills_provider.py       # Agent-scoped native MAF SkillsProvider factory
 │   ├── business_layer.py        # Workspace business semantic document store (data/)
@@ -151,9 +151,8 @@ Data-Insight-Agent-With-Ontology/
 - Python 3.10 or higher
 - Node.js 18.18+ (for React frontend tooling)
 - Java 11+ only when `ONTOLOGY_ENABLE_REASONER=true`; explicit OWL queries do not require startup reasoning
-- Azure subscription with:
-    - Azure OpenAI service with primary GPT and small GPT deployments
-    - Azure AI Foundry project only if logs are exported to an external evaluation workflow
+- An OpenAI-compatible API key (DeepSeek is the default provider)
+- An Azure AI Foundry project only if logs are exported to an external evaluation workflow
 - One analytical data source (optional, for data insight):
     - Azure Databricks with Unity Catalog SQL Warehouse (`DATA_SOURCE_TYPE=databricks`, default)
     - MySQL 8.0+ (`DATA_SOURCE_TYPE=mysql`)
@@ -176,22 +175,15 @@ cd frontend && npm install && cd ..
 
 ```bash
 cp .env.example .env
-# Edit .env with your Azure credentials
+# Edit .env with your model and data-source credentials
 ```
 
 Minimum required variables (see `.env.example` for full list):
 ```
-AZURE_OPENAI_ENDPOINT
-AZURE_OPENAI_AUTH_MODE      # auto | key | aad  (default: auto)
-AZURE_OPENAI_API_KEY        # required when AUTH_MODE=key or auto with key set
-AZURE_OPENAI_GPT_DEPLOYMENT
-```
-
-For **AAD / Entra ID** auth (when key-based auth is disabled on your Azure OpenAI resource):
-```
-AZURE_OPENAI_AUTH_MODE=aad
-# Leave AZURE_OPENAI_API_KEY empty or remove it
-# Ensure 'az login' identity has Cognitive Services OpenAI User role
+OPENAI_BASE_URL=https://api.deepseek.com
+OPENAI_API_KEY=<your-key>
+OPENAI_MODEL=deepseek-v4-pro
+OPENAI_SMALL_MODEL=deepseek-v4-flash
 ```
 
 ### Data Source Selection
@@ -272,13 +264,13 @@ Ontology is initialized from `.env` and then controlled per frontend session:
 
 With Ontology enabled, analytical questions start in `OntologyRouter` on the primary deployment. A confirmed governed template match skips Owlready2 and MetadataAgent, then DataInsightAgent loads the named Skill and indexed resource. Otherwise code calls the question-driven OWL composite lookup and defined-class lookup directly; only weak results escalate to the full OntologyAgent tool loop. Metadata then recalls and batch-fetches UC candidates before its small-model verification turn, and DataInsightAgent loads `sql-planning` to choose analytical roles, grain, comparisons, and SQL.
 
-With Ontology disabled or unavailable, analytical questions run `MetadataAgent (progressively loads metadata-mapping) → DataInsightAgent`. Every non-governed DataInsight request loads `sql-planning`; without Ontology it applies the same dynamic method using the original question and verified metadata only, without inventing semantic evidence. MasterAgent, OntologyRouter/OntologyAgent, and DataInsightAgent use the primary GPT deployment; both Metadata modes use `AZURE_OPENAI_GPT_SMALL_DEPLOYMENT`.
+With Ontology disabled or unavailable, analytical questions run `MetadataAgent (progressively loads metadata-mapping) → DataInsightAgent`. Every non-governed DataInsight request loads `sql-planning`; without Ontology it applies the same dynamic method using the original question and verified metadata only, without inventing semantic evidence. MasterAgent, OntologyRouter/OntologyAgent, and DataInsightAgent use `OPENAI_MODEL`; both Metadata modes use `OPENAI_SMALL_MODEL`.
 
 ## ⚙️ Configuration Reference
 
 All configuration classes are in `src/config/settings.py`:
 
-- `AzureOpenAIConfig` — endpoint, API key, `AUTH_MODE`, API version, GPT deployments
+- `OpenAIConfig` — OpenAI-compatible base URL, API key, primary model, and small model
 - `AzureAIFoundryConfig` — optional connection-string placeholder for deployment-specific integrations
 - `DataSourceConfig` — active data-source type (`DATA_SOURCE_TYPE=databricks|mysql`, default `databricks`)
 - `DatabricksConfig` — workspace host, token, SQL warehouse HTTP path, Unity Catalog allowlist, query limits, metadata cache, recall index/candidate bounds, and small-schema fallback bound
@@ -304,7 +296,7 @@ Status: `Planned` · `Ready` · `In progress` · `Blocked` · `Done`
 | [`ODA-001`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/1) | P0 | Planned | **Authentication and tenant isolation** | Add user login, backend token validation, user/tenant ownership checks for every session and run, role-based access to governed SQL, and authorization tests proving one user cannot read, stop, or delete another user's work. | — |
 | [`ODA-002`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/2) | P0 | Planned | **Durable sessions and multi-worker readiness** | Move MasterAgent session metadata, conversation history, response cache, and active-run state out of process-local dictionaries; support multiple workers or pods without losing routing, history, or stop requests. | `ODA-001` |
 | [`ODA-003`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/3) | P0 | Planned | **Per-question run tracking and trace UI** | Assign every question an immutable `run_id`; persist its route, ontology mode, agent stages, tool calls, sanitized inputs/outputs, SQL/query ID, timings, result status, and errors; add a dedicated UI tab for inspecting each run. | `ODA-001`, `ODA-002` |
-| [`ODA-004`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/4) | P0 | Planned | **End-to-end observability** | Add OpenTelemetry-compatible traces, metrics, and structured logs across API, MasterAgent, child agents, tools, Azure OpenAI, and Databricks; correlate all telemetry by `run_id`, `thread_id`, and user/tenant while redacting secrets and sensitive data. | `ODA-003` |
+| [`ODA-004`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/4) | P0 | Planned | **End-to-end observability** | Add OpenTelemetry-compatible traces, metrics, and structured logs across API, MasterAgent, child agents, tools, the configured LLM API, and Databricks; correlate all telemetry by `run_id`, `thread_id`, and user/tenant while redacting secrets and sensitive data. | `ODA-003` |
 | [`ODA-005`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/5) | P0 | Planned | **Code-enforced run safety and cancellation** | Enforce at most one `delegate_data_analysis` call per turn in code, make client disconnect set the cancellation event, propagate cancellation to child tasks and Databricks statements, and make retryable operations idempotent. | `ODA-002`, `ODA-003` |
 | [`ODA-006`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/6) | P1 | Planned | **User-configured governed question + SQL** | Provide an authenticated UI/API for users to create, test, version, enable, and retire question-to-SQL rules; validate read-only, allowlisted, fully qualified SQL; record ownership and audit history; route matched rules through a governed contract rather than executing arbitrary text directly. | `ODA-001`, `ODA-002`, `ODA-003` |
 | [`ODA-007`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/7) | P1 | Planned | **Chart generation for suitable answers** | Return a typed visualization specification alongside tabular results when a chart is useful; render supported chart types in the UI with accessible table fallback, preserve units/labels, and avoid inventing dimensions or series absent from the SQL result. | `ODA-003` |

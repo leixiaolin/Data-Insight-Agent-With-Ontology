@@ -1,10 +1,11 @@
 # Ontology Data Agent（本体数据智能体）
 
-一个由 Azure OpenAI、Microsoft Agent Framework (MAF)、OWL 业务本体和 Azure Databricks 驱动的企业级智能数据分析系统。面向治理下的 Unity Catalog 数据，支持以业务语言提问的分析场景。
+一个由 OpenAI 兼容大模型接口（默认 DeepSeek）、Microsoft Agent Framework (MAF)、OWL 业务本体，以及可配置的 Databricks/MySQL 数据源驱动的企业级智能数据分析系统。
 
 ## 🌟 功能特性
 
 ### 核心能力
+
 - **多智能体架构**：MasterAgent 编排三个专用智能体 —— OntologyAgent、MetadataAgent 和 DataInsightAgent，各自拥有领域专属工具
 - **MasterAgent 智能体循环**：一个有界的 MAF 函数循环，重复执行 模型 → 智能体/工具 → 观察，直到模型输出最终答案且不再发起工具调用
 - **技能（Skill）系统**：原生 MAF `SkillsProvider` 按智能体范围播报技能，并按需加载完整指令或索引资源
@@ -19,7 +20,8 @@
 - **流式 SSE 响应**：FastAPI 流式传输 `thinking`、`text`、`answer_reset`、`thinking_done`、`stopped`、`done` 和 `error`
 
 ### 技术栈
-- **LLM 路由**：主 Azure OpenAI 部署用于 Master、本体路由/恢复和 DataInsight；`AZURE_OPENAI_GPT_SMALL_DEPLOYMENT` 用于元数据发现/验证
+
+- **LLM 路由**：`OPENAI_MODEL` 用于 Master、本体路由/恢复和 DataInsight；`OPENAI_SMALL_MODEL` 用于元数据发现/验证，默认分别使用 DeepSeek V4 Pro 和 V4 Flash
 - **智能体框架**：Microsoft Agent Framework 1.11 — `OpenAIChatCompletionClient`
 - **主前端**：React + TypeScript（Vite，端口 3000）
 - **后端 API**：FastAPI 与 Server-Sent Events（端口 8000）
@@ -51,7 +53,7 @@ flowchart TD
         FS --> SP
     end
 
-    subgraph AgentLayer["智能体层 — Microsoft Agent Framework · Azure OpenAI"]
+    subgraph AgentLayer["智能体层 — Microsoft Agent Framework · OpenAI 兼容接口"]
         MA(["🧠 MasterAgent\n有界智能体循环"])
         OA(["OntologyRouter + OntologyAgent"])
         DIA(["📊 DataInsightAgent"])
@@ -59,8 +61,8 @@ flowchart TD
         MA --> OA & DIA & META
     end
 
-    subgraph AzureServices["Azure 服务"]
-        AOAI["☁️ Azure OpenAI\n主 GPT + 小型 GPT 部署"]
+    subgraph ModelServices["模型服务"]
+        AOAI["☁️ DeepSeek / OpenAI 兼容接口\n主模型 + 轻量模型"]
         AIF["Azure AI Foundry\n可选外部评估"]
     end
 
@@ -109,7 +111,7 @@ Data-Insight-Agent-With-Ontology/
 │   ├── prompts/                 # 各智能体系统提示词：
 │   │   └── master.py · ontology.py · data_insight.py · metadata.py
 │   ├── config/
-│   │   └── settings.py          # AzureOpenAIConfig, AzureAIFoundryConfig,
+│   │   └── settings.py          # OpenAIConfig, AzureAIFoundryConfig,
 │   │                            #   DatabricksConfig, OntologyConfig, AppConfig
 │   ├── skills_provider.py       # 智能体范围的原生 MAF SkillsProvider 工厂
 │   ├── business_layer.py        # 工作区业务语义文档存储（data/）
@@ -151,12 +153,11 @@ Data-Insight-Agent-With-Ontology/
 - Python 3.10 或更高版本
 - Node.js 18.18+（用于 React 前端工具链）
 - 仅当 `ONTOLOGY_ENABLE_REASONER=true` 时需要 Java 11+；显式 OWL 查询无需启动推理
-- Azure 订阅，需包含：
-    - Azure OpenAI 服务，含主 GPT 和小型 GPT 部署
-    - 仅当日志导出到外部评估工作流时才需要 Azure AI Foundry 项目
+- OpenAI 兼容接口的 API 密钥（默认提供方为 DeepSeek）
+- 仅当日志导出到外部评估工作流时才需要 Azure AI Foundry 项目
 - 一个分析数据源（可选，用于数据洞察）：
-    - Azure Databricks 与 Unity Catalog SQL Warehouse（`DATA_SOURCE_TYPE=databricks`，默认）
-    - MySQL 8.0+（`DATA_SOURCE_TYPE=mysql`）
+  - Azure Databricks 与 Unity Catalog SQL Warehouse（`DATA_SOURCE_TYPE=databricks`，默认）
+  - MySQL 8.0+（`DATA_SOURCE_TYPE=mysql`）
 
 ### 安装
 
@@ -166,6 +167,7 @@ Data-Insight-Agent-With-Ontology/
 ```
 
 或手动安装：
+
 ```bash
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
@@ -176,22 +178,16 @@ cd frontend && npm install && cd ..
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填入你的 Azure 凭据
+# 编辑 .env，填入模型与数据源凭据
 ```
 
 最少必填变量（完整列表见 `.env.example`）：
-```
-AZURE_OPENAI_ENDPOINT
-AZURE_OPENAI_AUTH_MODE      # auto | key | aad （默认：auto）
-AZURE_OPENAI_API_KEY        # 当 AUTH_MODE=key 或 auto 且已设置 key 时必填
-AZURE_OPENAI_GPT_DEPLOYMENT
-```
 
-**AAD / Entra ID** 认证（当 Azure OpenAI 资源禁用了基于密钥的认证时）：
 ```
-AZURE_OPENAI_AUTH_MODE=aad
-# 将 AZURE_OPENAI_API_KEY 留空或删除
-# 确保 'az login' 身份具有 Cognitive Services OpenAI User 角色
+OPENAI_BASE_URL=https://api.deepseek.com
+OPENAI_API_KEY=<your-key>
+OPENAI_MODEL=deepseek-v4-pro
+OPENAI_SMALL_MODEL=deepseek-v4-flash
 ```
 
 ### 数据源选择
@@ -204,6 +200,7 @@ DATA_SOURCE_TYPE=mysql        # MySQL 8.0+
 ```
 
 **MySQL 模式** — 追加：
+
 ```
 MYSQL_HOST=localhost
 MYSQL_PORT=3306
@@ -220,6 +217,7 @@ MySQL 模式下强制执行的规则：
 - 通用策略变量（`DATA_MAX_ROWS`、`DATA_QUERY_TIMEOUT`、`DATA_METADATA_CACHE_TTL_SECONDS`）回退读取旧的 `DATABRICKS_*` 变量名，现有 `.env` 无需迁移。
 
 推荐的 MySQL 只读账号授权：
+
 ```sql
 CREATE USER 'readonly_user'@'%' IDENTIFIED BY '********';
 GRANT SELECT ON sales.* TO 'readonly_user'@'%';
@@ -243,6 +241,50 @@ MySQL 模式的限制：
 ./stop.sh            # 停止本地启动的后端/前端进程
 ```
 
+如需让 FastAPI 后端脱离当前终端在后台持续运行，可使用：
+
+```bash
+mkdir -p logs
+nohup ./run.sh backend > logs/backend.nohup.log 2>&1 &
+
+# 确认服务已经启动
+curl http://localhost:8000/health
+
+# 查看后台日志
+tail -f logs/backend.nohup.log
+
+# 停止本项目启动的后台服务
+./stop.sh
+```
+
+后台启动前仍需完成 `.env` 配置。端口可通过 `.env` 中的 `BACKEND_PORT` 调整；修改端口后，健康检查地址也应使用相同端口。
+
+Windows PowerShell 可使用仓库中的 Windows 虚拟环境在后台启动后端：
+
+```powershell
+New-Item -ItemType Directory -Force logs, tmp | Out-Null
+$backendProcess = Start-Process `
+  -FilePath ".\venv\Scripts\python.exe" `
+  -ArgumentList "-m", "uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000" `
+  -RedirectStandardOutput "logs\backend.windows.log" `
+  -RedirectStandardError "logs\backend.windows.error.log" `
+  -WindowStyle Hidden `
+  -PassThru
+$backendProcess.Id | Set-Content "tmp\backend.windows.pid"
+
+# 确认服务已经启动
+Invoke-RestMethod http://localhost:8000/health
+
+# 查看后台日志
+Get-Content "logs\backend.windows.log" -Wait
+
+# 停止后台服务
+Stop-Process -Id (Get-Content "tmp\backend.windows.pid")
+Remove-Item "tmp\backend.windows.pid"
+```
+
+上述 PowerShell 命令不启用 Uvicorn 自动重载，适合稳定的后台演示。开发时如需代码热重载，可在前台运行 `.\venv\Scripts\python.exe -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload`。
+
 在浏览器访问 React 界面：`http://localhost:3000`。
 
 ## 💡 使用说明
@@ -257,28 +299,28 @@ MySQL 模式的限制：
 
 ### 问题类型
 
-| 类型 | 示例 | 路由至 |
-|------|------|--------|
-| 数据分析 | "按地区比较订单数、销量、销售额和平均客单价" | 数据分析流水线 |
-| 结构发现 | "What tables are available in the silver schema?" | MetadataAgent |
+| 类型     | 示例                                              | 路由至         |
+| -------- | ------------------------------------------------- | -------------- |
+| 数据分析 | "按地区比较订单数、销量、销售额和平均客单价"      | 数据分析流水线 |
+| 结构发现 | "What tables are available in the silver schema?" | MetadataAgent  |
 
 ### 功能开关
 
 本体从 `.env` 初始化，之后由每个前端会话单独控制：
 
-| 标志 | 默认值 | 作用 |
-|------|--------|------|
+| 标志                        | 默认值   | 作用                           |
+| --------------------------- | -------- | ------------------------------ |
 | `DEFAULT_ENABLE_ONTOLOGY` | `true` | 每个新聊天会话的本体开关初始值 |
 
 启用本体后，分析问题首先在主部署上进入 `OntologyRouter`。确认匹配受治理模板时跳过 Owlready2 和 MetadataAgent，随后 DataInsightAgent 加载指定的 Skill 和索引资源。否则代码直接调用问题驱动的 OWL 组合查询和已定义类查询；仅当结果较弱时才升级到完整的 OntologyAgent 工具循环。接着 Metadata 召回并批量获取 UC 候选，然后执行小模型验证轮次，最后 DataInsightAgent 加载 `sql-planning` 来选择分析角色、粒度、对比方式和 SQL。
 
-本体禁用或不可用时，分析问题执行 `MetadataAgent（渐进加载 metadata-mapping）→ DataInsightAgent`。每个非受治理的 DataInsight 请求都会加载 `sql-planning`；在无本体情况下，它使用相同的方法，仅基于原始问题和已验证的元数据，不虚构语义证据。MasterAgent、OntologyRouter/OntologyAgent 和 DataInsightAgent 使用主 GPT 部署；两种 Metadata 模式均使用 `AZURE_OPENAI_GPT_SMALL_DEPLOYMENT`。
+本体禁用或不可用时，分析问题执行 `MetadataAgent（渐进加载 metadata-mapping）→ DataInsightAgent`。每个非受治理的 DataInsight 请求都会加载 `sql-planning`；在无本体情况下，它使用相同的方法，仅基于原始问题和已验证的元数据，不虚构语义证据。MasterAgent、OntologyRouter/OntologyAgent 和 DataInsightAgent 使用 `OPENAI_MODEL`；两种 Metadata 模式均使用 `OPENAI_SMALL_MODEL`。
 
 ## ⚙️ 配置参考
 
 所有配置类位于 `src/config/settings.py`：
 
-- `AzureOpenAIConfig` — 终端节点、API 密钥、`AUTH_MODE`、API 版本、GPT 部署
+- `OpenAIConfig` — OpenAI 兼容接口地址、API 密钥、主模型与轻量模型
 - `AzureAIFoundryConfig` — 用于部署特定集成的可选连接字符串占位符
 - `DataSourceConfig` — 活跃数据源类型（`DATA_SOURCE_TYPE=databricks|mysql`，默认 `databricks`）
 - `DatabricksConfig` — 工作区主机、令牌、SQL Warehouse HTTP 路径、Unity Catalog 白名单、查询限制、元数据缓存、召回索引/候选上限、小结构回退上限
@@ -290,6 +332,7 @@ MySQL 模式的限制：
 ## 📊 评估
 
 应用当前未注册 Azure AI Foundry 或 Application Insights 导出器。将 `logs/` 中的日志导出到你的评估系统，可用于：
+
 - 接地度（Groundedness）、相关性、连贯性指标
 - A/B 测试：本体增强开启/关闭
 
@@ -299,20 +342,20 @@ MySQL 模式的限制：
 
 状态：`Planned`（已规划） · `Ready`（就绪） · `In progress`（进行中） · `Blocked`（受阻） · `Done`（完成）
 
-| ID | 优先级 | 状态 | 待办项 | 完成标准 | 依赖 |
-|---|---|---|---|---|---|
-| [`ODA-001`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/1) | P0 | Planned | **认证与租户隔离** | 增加用户登录、后端令牌校验、对每个会话和运行的用户/租户所有权检查、受治理 SQL 的基于角色的访问，以及证明一个用户无法读取、停止或删除另一用户工作的授权测试。 | — |
-| [`ODA-002`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/2) | P0 | Planned | **持久会话与多 Worker 就绪** | 将 MasterAgent 会话元数据、对话历史、响应缓存和活跃运行状态移出进程本地字典；支持多 Worker 或多 Pod 而不丢失路由、历史或停止请求。 | `ODA-001` |
-| [`ODA-003`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/3) | P0 | Planned | **按问题运行追踪与 Trace 界面** | 为每个问题分配不可变的 `run_id`；持久化其路由、本体模式、智能体阶段、工具调用、脱敏的输入/输出、SQL/查询 ID、耗时、结果状态和错误；增加专用界面页签用于检查每次运行。 | `ODA-001`、`ODA-002` |
-| [`ODA-004`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/4) | P0 | Planned | **端到端可观测性** | 在 API、MasterAgent、子智能体、工具、Azure OpenAI 和 Databricks 之间添加 OpenTelemetry 兼容的追踪、指标和结构化日志；按 `run_id`、`thread_id` 和用户/租户关联所有遥测数据，同时脱敏机密和敏感数据。 | `ODA-003` |
-| [`ODA-005`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/5) | P0 | Planned | **代码强制的运行安全与取消** | 在代码中强制每轮最多一次 `delegate_data_analysis` 调用，使客户端断开连接设置取消事件，将取消传播到子任务和 Databricks 语句，并使可重试操作幂等。 | `ODA-002`、`ODA-003` |
-| [`ODA-006`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/6) | P1 | Planned | **用户配置的受治理问题 + SQL** | 提供经过认证的界面/API，供用户创建、测试、版本化、启用和停用问题到 SQL 的规则；校验只读、白名单内、完全限定的 SQL；记录所有权和审计历史；匹配的规则通过受治理契约路由，而非直接执行任意文本。 | `ODA-001`、`ODA-002`、`ODA-003` |
-| [`ODA-007`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/7) | P1 | Planned | **为适合的答案生成图表** | 当图表有用时，随表格结果一起返回类型化的可视化规范；在界面中渲染支持的图表类型并提供无障碍表格回退，保留单位/标签，不虚构 SQL 结果中不存在的维度或系列。 | `ODA-003` |
-| [`ODA-008`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/8) | P1 | Planned | **用户级持久记忆** | 持久化用户批准的偏好、业务术语、常用分析设置和紧凑的对话摘要；按用户/租户隔离记忆，提供查看/编辑/删除控制，跟踪来源，且绝不将记忆视为已验证的 Unity Catalog 或本体证据。 | `ODA-001`、`ODA-002` |
-| [`ODA-009`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/9) | P1 | Planned | **可靠的多轮答案连续性** | 通过在 MasterAgent 可见的历史中存储有界的结构化结果摘要，使后续问题能可靠地引用先前的 DataInsight 结果；保持缓存响应与 MAF 会话一致，而不是让它们的历史出现分歧。 | `ODA-002`、`ODA-003` |
-| [`ODA-010`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/10) | P1 | Planned | **有界的智能体间证据契约** | 对 Ontology→Metadata→DataInsight 的载荷模式进行版本化和校验，应用可配置的 token/字符预算，为保留的证据保留来源信息，并显式报告有损裁剪。 | `ODA-003` |
-| [`ODA-011`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/11) | P2 | Planned | **Databricks 并发执行** | 用有界连接池或请求级连接替换进程级 SQL 连接和全局执行锁；在并发下保留查询取消、超时、重试和每用户限制。 | `ODA-001`、`ODA-004` |
-| [`ODA-012`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/12) | P2 | Planned | **跨进程的持久运行恢复** | 对已完成的流水线阶段设置检查点，使其他 Worker 可以安全地恢复中断的运行，而不重复已完成的本体/元数据工作或产生重复副作用；使用租约和幂等键防止双重恢复。 | `ODA-002`、`ODA-003`、`ODA-005` |
+| ID                                                                                    | 优先级 | 状态    | 待办项                                | 完成标准                                                                                                                                                                                                    | 依赖                                  |
+| ------------------------------------------------------------------------------------- | ------ | ------- | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| [`ODA-001`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/1)  | P0     | Planned | **认证与租户隔离**              | 增加用户登录、后端令牌校验、对每个会话和运行的用户/租户所有权检查、受治理 SQL 的基于角色的访问，以及证明一个用户无法读取、停止或删除另一用户工作的授权测试。                                                | —                                    |
+| [`ODA-002`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/2)  | P0     | Planned | **持久会话与多 Worker 就绪**    | 将 MasterAgent 会话元数据、对话历史、响应缓存和活跃运行状态移出进程本地字典；支持多 Worker 或多 Pod 而不丢失路由、历史或停止请求。                                                                          | `ODA-001`                           |
+| [`ODA-003`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/3)  | P0     | Planned | **按问题运行追踪与 Trace 界面** | 为每个问题分配不可变的`run_id`；持久化其路由、本体模式、智能体阶段、工具调用、脱敏的输入/输出、SQL/查询 ID、耗时、结果状态和错误；增加专用界面页签用于检查每次运行。                                      | `ODA-001`、`ODA-002`              |
+| [`ODA-004`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/4)  | P0     | Planned | **端到端可观测性**              | 在 API、MasterAgent、子智能体、工具、已配置的大模型接口和 Databricks 之间添加 OpenTelemetry 兼容的追踪、指标和结构化日志；按`run_id`、`thread_id` 和用户/租户关联所有遥测数据，同时脱敏机密和敏感数据。 | `ODA-003`                           |
+| [`ODA-005`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/5)  | P0     | Planned | **代码强制的运行安全与取消**    | 在代码中强制每轮最多一次`delegate_data_analysis` 调用，使客户端断开连接设置取消事件，将取消传播到子任务和 Databricks 语句，并使可重试操作幂等。                                                           | `ODA-002`、`ODA-003`              |
+| [`ODA-006`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/6)  | P1     | Planned | **用户配置的受治理问题 + SQL**  | 提供经过认证的界面/API，供用户创建、测试、版本化、启用和停用问题到 SQL 的规则；校验只读、白名单内、完全限定的 SQL；记录所有权和审计历史；匹配的规则通过受治理契约路由，而非直接执行任意文本。               | `ODA-001`、`ODA-002`、`ODA-003` |
+| [`ODA-007`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/7)  | P1     | Planned | **为适合的答案生成图表**        | 当图表有用时，随表格结果一起返回类型化的可视化规范；在界面中渲染支持的图表类型并提供无障碍表格回退，保留单位/标签，不虚构 SQL 结果中不存在的维度或系列。                                                    | `ODA-003`                           |
+| [`ODA-008`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/8)  | P1     | Planned | **用户级持久记忆**              | 持久化用户批准的偏好、业务术语、常用分析设置和紧凑的对话摘要；按用户/租户隔离记忆，提供查看/编辑/删除控制，跟踪来源，且绝不将记忆视为已验证的 Unity Catalog 或本体证据。                                    | `ODA-001`、`ODA-002`              |
+| [`ODA-009`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/9)  | P1     | Planned | **可靠的多轮答案连续性**        | 通过在 MasterAgent 可见的历史中存储有界的结构化结果摘要，使后续问题能可靠地引用先前的 DataInsight 结果；保持缓存响应与 MAF 会话一致，而不是让它们的历史出现分歧。                                           | `ODA-002`、`ODA-003`              |
+| [`ODA-010`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/10) | P1     | Planned | **有界的智能体间证据契约**      | 对 Ontology→Metadata→DataInsight 的载荷模式进行版本化和校验，应用可配置的 token/字符预算，为保留的证据保留来源信息，并显式报告有损裁剪。                                                                  | `ODA-003`                           |
+| [`ODA-011`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/11) | P2     | Planned | **Databricks 并发执行**         | 用有界连接池或请求级连接替换进程级 SQL 连接和全局执行锁；在并发下保留查询取消、超时、重试和每用户限制。                                                                                                     | `ODA-001`、`ODA-004`              |
+| [`ODA-012`](https://github.com/tianputao/Data-Insight-Agent-With-Ontology/issues/12) | P2     | Planned | **跨进程的持久运行恢复**        | 对已完成的流水线阶段设置检查点，使其他 Worker 可以安全地恢复中断的运行，而不重复已完成的本体/元数据工作或产生重复副作用；使用租约和幂等键防止双重恢复。                                                     | `ODA-002`、`ODA-003`、`ODA-005` |
 
 ### 待办事项守护原则
 
@@ -332,12 +375,11 @@ venv/bin/python -m pip check
 npm --prefix frontend audit
 ```
 
-
 ## 📝 日志
 
 日志位于 `logs/application_YYYYMMDD.log`：
-- 智能体决策、工具调用、本体查询、SQL 执行、错误
 
+- 智能体决策、工具调用、本体查询、SQL 执行、错误
 
 ## 📄 许可证
 

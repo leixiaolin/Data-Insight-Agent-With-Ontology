@@ -174,9 +174,14 @@ class OntologyService:
             self.world = World()
             for path in self.files:
                 try:
-                    ontology = self.world.get_ontology(path.as_uri()).load(
-                        only_local=self.only_local
-                    )
+                    # Passing the stream explicitly avoids Owlready2 reopening a
+                    # Windows file URI as ``/D:/...``, which is not a valid local
+                    # path on Windows. The URI remains the ontology's stable base.
+                    with path.open("rb") as ontology_file:
+                        ontology = self.world.get_ontology(path.as_uri()).load(
+                            only_local=self.only_local,
+                            fileobj=ontology_file,
+                        )
                     self.ontologies.append(ontology)
                 except Exception as exc:
                     self.load_errors.append({"file": str(path), "error": str(exc)})
