@@ -1,5 +1,10 @@
 import axios from 'axios';
-import type { MySQLSettings, RuntimeConfig, SkillInfo, ThreadSummary } from '../types';
+import type { AnalysisStatus, MySQLSettings, RuntimeConfig, SkillInfo, ThreadSummary, ThreadHistoryMessage } from '../types';
+
+export function parseAnalysisStatus(value: unknown): AnalysisStatus | undefined {
+  return value === 'completed' || value === 'partial' || value === 'insufficient' || value === 'failed'
+    ? value : undefined;
+}
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 
@@ -31,8 +36,8 @@ export const apiService = {
     return response.data;
   },
 
-  async getThreadHistory(threadId: string): Promise<{ thread_id: string; messages: any[] }> {
-    const response = await apiClient.get(`/threads/${threadId}/history`);
+  async getThreadHistory(threadId: string): Promise<{ thread_id: string; messages: ThreadHistoryMessage[] }> {
+    const response = await apiClient.get<{ thread_id: string; messages: ThreadHistoryMessage[] }>(`/threads/${threadId}/history`);
     return response.data;
   },
 

@@ -1,9 +1,18 @@
 // Type definitions for Azure Doc Agent frontend
+export type AnalysisStatus = 'completed' | 'partial' | 'insufficient' | 'failed';
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   timestamp: string;
+  analysisStatus?: AnalysisStatus;
+}
+
+export interface ThreadHistoryMessage {
+  user: string;
+  assistant: string;
+  timestamp: string;
+  analysis_status?: AnalysisStatus;
 }
 
 export interface SkillInfo {

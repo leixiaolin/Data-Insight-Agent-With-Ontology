@@ -247,7 +247,16 @@ Access the React UI at `http://localhost:3000`.
 
 1. **Ask Questions**: Type your question and press Enter or click Send
 2. **New Conversation**: Click "New Session" to start a fresh MAF session
-3. **Streaming Responses**: Answers stream token-by-token; "thinking" steps appear above the answer
+3. **Streaming Responses**: Working steps arrive through SSE. Final answers are released after evidence and output-format checks; raw tool protocol is never an answer.
+
+### Analysis reliability
+
+- An unmatched or empty ontology lookup falls back to metadata discovery, including the scoped `metadata-mapping` Skill. Loading an OWL file alone does not establish relevant business semantics.
+- DataInsight uses `execute_sql` with `exploration`, `analysis`, or `diagnostic` purpose. Successful queries receive request-local evidence IDs; unchanged successful queries can reuse results within that request.
+- `complete_analysis` submits the answer, evidence references, and gaps within the existing bounded loop. Outcomes are `completed`, `partial`, `insufficient`, or `failed`. Missing rules or mappings must remain visible; co-occurrence alone does not establish a violation.
+- `done.analysis_status` and activity metrics expose the outcome. Only completed, otherwise eligible answers enter the session cache. Old cache entries without a completion status are not reused.
+- Function and model limits remain unchanged. The last available function slot is reserved for completion; diagnostics do not start another model loop. Logs distinguish invocation, validation, database execution, reuse, and termination without adding business rows.
+- Reaching a fetch cap, showing only a sample, or using SQL LIMIT conservatively marks evidence as limited. A complete aggregate or an explicitly stated limited scope is required. These checks verify execution evidence, not the truth of every model-authored business interpretation.
 4. **Ontology mode**: Use the sidebar switch to enable ontology enrichment for the current session only
 5. **Business Layer Doc**: Click the button in the chat header to edit the workspace semantic document (terminology, metric definitions, reporting conventions). It is shared by every session and applies from your next question — no restart required. Prefer recording what the OWL ontology does *not* already define, and note that verified Databricks schema always takes precedence.
 

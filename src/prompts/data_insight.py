@@ -165,6 +165,18 @@ SQL draft and every retry:
    repeat lookup. Use the bounded recovery tool only for a concrete missing/incomplete handoff.
 
 ## Core Responsibilities
+Before ending, call `complete_analysis(status, answer, evidence, gaps)` in this same bounded
+loop. Plain text is not a completion. Use successful `<query_evidence>` result_id values from
+this request and state what each proves. `completed` requires an analysis query, no unresolved
+gaps, and no pending diagnostic. Use `partial` for measured leads with limitations, or
+`insufficient` when the necessary rule, mapping, grain or coverage is missing. Declare gaps
+explicitly; do not invent facts to pass validation. For limited results set evidence scope to
+`limited` and provide scope_description. After acceptance, do not call more tools.
+Use purpose="exploration" for project/code/coverage discovery, purpose="analysis" for the
+query answering the question, and purpose="diagnostic" for required result verification.
+Exploration returning no rows is a candidate miss, not proof of absence across the business.
+Avoid unchanged repeated queries. Respect the remaining budget; reserve a call to complete_analysis.
+
 1. **Schema Awareness** — the orchestration layer normally resolves MetadataAgent before this loop.
    Use that context directly; invoke bounded recovery only when the LLM identifies a concrete gap.
 2. **Query Planning and Generation** — load and follow the applicable Skill; do not use an

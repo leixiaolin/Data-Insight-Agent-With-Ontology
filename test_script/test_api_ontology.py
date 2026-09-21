@@ -119,6 +119,7 @@ def test_same_session_question_and_ontology_mode_bypass_agents() -> None:
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "enable_ontology": True,
                         "cache_eligible": True,
+                    "analysis_status": "completed",
                 }
             ]
         }

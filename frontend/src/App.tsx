@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { apiService } from './services/api';
-import type { ChatMessage, SessionInfo } from './types';
+import { apiService, parseAnalysisStatus } from './services/api';
+import type { AnalysisStatus, ChatMessage, SessionInfo } from './types';
 import './styles/global.css';
 import './styles/App.css';
 import ReactMarkdown from 'react-markdown';
@@ -549,7 +549,7 @@ function App() {
         updateAssistantMessage(assistantContent, thinkingForMessage);
       };
 
-      const finalizeAssistantMessage = (finalContent?: string) => {
+      const finalizeAssistantMessage = (finalContent?: string, analysisStatus?: AnalysisStatus) => {
         if (typeof finalContent === 'string' && finalContent.trim()) {
           assistantContent = finalContent;
         }
@@ -568,7 +568,8 @@ function App() {
               ...lastMsg,
               content: assistantContent,
               thinking: [...thinkingForMessage],
-              thinkingCollapsed: true
+              thinkingCollapsed: true,
+              analysisStatus
             };
           }
           return newMessages;
@@ -577,21 +578,22 @@ function App() {
 
       const handleSsePayload = async (payload: string) => {
         if (!payload.trim()) return;
-        const data = JSON.parse(payload);
+        const data = JSON.parse(payload) as Record<string, unknown>;
 
         if (data.type === 'thinking') {
           upsertThinking(data);
         } else if (data.type === 'thinking_done') {
           completeThinking();
         } else if (data.type === 'text') {
-          assistantContent += data.content;
+          assistantContent += typeof data.content === 'string' ? data.content : '';
           updateAssistantMessage(assistantContent, thinkingForMessage);
         } else if (data.type === 'answer_reset') {
           assistantContent = '';
           updateAssistantMessage(assistantContent, thinkingForMessage);
         } else if (data.type === 'done') {
           finalizeAssistantMessage(
-            typeof data.content === 'string' ? data.content : undefined
+            typeof data.content === 'string' ? data.content : undefined,
+            parseAnalysisStatus(data.analysis_status)
           );
         } else if (data.type === 'stopped') {
           upsertThinking({
@@ -608,7 +610,7 @@ function App() {
             state: 'error',
             message: data.message || '处理请求时发生错误'
           });
-          throw new Error(data.message);
+          throw new Error(typeof data.message === 'string' ? data.message : '处理请求时发生错误');
         }
       };
 
@@ -892,6 +894,11 @@ function App() {
                           
                           {/* Assistant response */}
                           <div className="message assistant">
+                            {msg.analysisStatus && msg.analysisStatus !== 'completed' && (
+                              <p role="status" className="analysis-status">
+                                {{ partial: '部分线索：请注意结论范围与限制', insufficient: '证据不足：尚不能完成判定', failed: '分析未完成' }[msg.analysisStatus]}
+                              </p>
+                            )}
                             <ReactMarkdown
                               remarkPlugins={[remarkGfm]}
                               urlTransform={(url) => url}

@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from threading import Event
 from typing import Any, Optional
+from .analysis_result import AnalysisCompletion
 
 
 @dataclass(slots=True)
@@ -37,6 +38,7 @@ class QueryEngineContext:
     cancel_event: Optional[Event] = None
     tool_outcomes: list[ToolOutcome] = field(default_factory=list)
     progress: dict[str, Any] = field(default_factory=dict)
+    analysis_result: AnalysisCompletion | None = None
 
     @property
     def cancelled(self) -> bool:

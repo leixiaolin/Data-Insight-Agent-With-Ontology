@@ -11,6 +11,10 @@ from pydantic import Field
 
 from ..config import AgentReasoningConfig, OpenAIConfig, OntologyConfig
 from ..ontology import OntologyService
+from ..ontology.evidence import (
+    select_business_evidence,
+    usable_business_evidence,
+)
 from ..prompts import ONTOLOGY_AGENT_PROMPT, ONTOLOGY_ROUTER_PROMPT
 from ..skills_provider import create_skills_provider
 from ..utils import get_logger
@@ -422,7 +426,7 @@ class OntologyAgent:
     @staticmethod
     def needs_recovery(payload: dict[str, Any]) -> bool:
         """Return whether the composite lookup is too weak to hand off unaided."""
-        if not isinstance(payload, dict) or payload.get("status") != "ok":
+        if not usable_business_evidence(payload):
             return True
         try:
             confidence = float(payload.get("confidence") or 0.0)
@@ -541,13 +545,13 @@ class OntologyAgent:
         """Drop only provably redundant results and record every removal."""
         kept: list[dict[str, Any]] = []
         removed: list[dict[str, Any]] = []
-        seen_calls: set[tuple[str, str]] = set()
+        seen_calls: set[tuple[str, str, str]] = set()
         seen_payloads: set[str] = set()
 
         for item in additional:
             tool = str(item.get("tool") or "")
-            call_key = (tool, cls._stable_json(item.get("arguments") or {}))
             payload_key = cls._stable_json(item.get("result"))
+            call_key = (tool, cls._stable_json(item.get("arguments") or {}), payload_key)
             if call_key in seen_calls:
                 reason = "identical repeated call"
             elif payload_key in seen_payloads:
@@ -624,14 +628,7 @@ class OntologyAgent:
                 separators=(",", ":"),
             )
 
-        primary_item = next(
-            (
-                item
-                for item in tool_results
-                if item.get("tool") == "get_business_context"
-            ),
-            None,
-        )
+        primary_item = select_business_evidence(tool_results)
         primary = primary_item.get("result") if primary_item else None
         primary_data = (
             primary.get("data")
@@ -673,9 +670,18 @@ class OntologyAgent:
             "warnings": primary.get("warnings", []) if isinstance(primary, dict) else [],
             "unresolved": primary.get("unresolved", []) if isinstance(primary, dict) else [],
         }
+        # Recovery may supersede a failed lookup without erasing its unresolved gaps.
+        for key in ("warnings", "unresolved"):
+            values = list(semantic_summary[key])
+            for item in tool_results:
+                payload = item.get("result")
+                for value in payload.get(key, []) if isinstance(payload, dict) else []:
+                    if value not in values:
+                        values.append(value)
+            semantic_summary[key] = values
         return json.dumps(
             {
-                "status": "ok" if tool_results else "no_tool_results",
+                "status": "ok" if primary_item else "no_match",
                 "primary_tool_call": (
                     {
                         "tool": primary_item.get("tool"),

@@ -62,7 +62,7 @@ The Ontology Data Agent uses a **multi-agent orchestration pattern** built on th
 ### 1. Frontend Layer
 
 **React + TypeScript** (Vite, `frontend/`)
-- Chat interface with token-by-token streaming
+- Chat interface with streamed working activities and validated final answers
 - "Thinking" step panel showing live agent reasoning
 - Per-session conversation threads via `/threads/new` REST call
 - Per-session Ontology switch initialized from the backend environment default
@@ -93,7 +93,7 @@ The Ontology Data Agent uses a **multi-agent orchestration pattern** built on th
 | `thinking` | `{"message": "..."}` | Agent reasoning step |
 | `text` | `{"content": "..."}` | Response token chunk |
 | `answer_reset` | `{}` | Retract text when a following tool call proves it was working narration |
-| `done` | `{"content": "<final answer>"}` | Stream complete; authoritative final answer |
+| `done` | `{"content": "<final answer>", "analysis_status": "completed\|partial\|insufficient\|failed"}` | Stream complete; authoritative final answer and optional completion status |
 | `stopped` | `{"message": "..."}` | Current thread task was cancelled by the user |
 | `error` | `{"message": "..."}` | Error description |
 
@@ -126,6 +126,12 @@ The Ontology Data Agent uses a **multi-agent orchestration pattern** built on th
 **Input routing logic**: MasterAgent uses `MASTER_AGENT_PROMPT` to decide which tool to call. Questions requiring data analytics or schema discovery are delegated. Data Skills are advertised only inside their assigned sub-agents.
 
 **Agentic loop ownership**: A user turn invokes `MasterAgent` exactly once. Its MAF `OpenAIChatCompletionClient` owns the bounded function-invocation loop: it streams a model response, executes requested Agent/tools, appends each function result as an observation, and calls the model again. The loop exits when the model emits no further function call, reaches the configured model-roundtrip/function-call limit, or reaches the consecutive-error limit. There is no second answer judge, hidden feedback turn, or fixed 180-second MasterAgent timeout.
+
+**Validated analytical completion**: DataInsight keeps a request-local execution ledger and returns an `AnalysisCompletion` through an internal result sink. `complete_analysis(status, answer, evidence, gaps)` checks current-request successful SQL references, analysis-purpose evidence, pending diagnostics, and explicit coverage limits. Only an accepted `completed` result marks the analytical pipeline successful. Partial evidence and insufficiency are delivered with visible limitations; missing completion is a failure. Master receives status rather than inferring success from text or `[STREAMED]`. SSE delivers only the validated analytical answer, ignoring subsequent Master paraphrases. Protocol-looking output without a valid completion is rejected before delivery and cache insertion.
+
+**Bounded exploration**: MAF chat/function middleware counts native Skills and SQL/recovery/completion calls against the existing limits. It reserves the final call for `complete_analysis` and never re-enables tools disabled by MAF. Required diagnostics stay in the same loop. Successful SQL output can be reused only in the same request using a dialect-aware AST fingerprint plus source, row cap and purpose; failed/blocked SQL is not reusable. Logs carry request/thread/run correlation and execution stages, without storing additional result rows. Completion checks are factual guards, not an additional semantic judge.
+
+**Ontology evidence**: Shared validation rejects empty, failed and `no_match` business contexts. Recovery selects the highest-confidence successful tool evidence, breaking ties by recency, and retains other evidence and unresolved gaps. No usable context triggers metadata discovery and `ontology_applied=false`; partial valid semantics remain qualified. Full-schema recall indicates physical candidates, not proof of business mappings.
 
 This matches the central Claude QueryEngine control path while retaining MAF's native function-call protocol. Request-local `ToolOutcome` records are observability data only; they do not trigger a second `agent.run()`.
 

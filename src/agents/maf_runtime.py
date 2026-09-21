@@ -122,6 +122,7 @@ def create_agent(
     model: Optional[str] = None,
     max_iterations: Optional[int] = None,
     max_function_calls: Optional[int] = None,
+    middleware: Optional[Sequence[Any]] = None,
 ) -> Agent:
     """Create a MAF Agent while keeping construction consistent across sub-agents."""
     selected_model = model or OpenAIConfig.MODEL
@@ -148,6 +149,7 @@ def create_agent(
         tools=resolved_tools,
         context_providers=resolved_providers,
         default_options=default_options,
+        middleware=middleware,
     )
 
 

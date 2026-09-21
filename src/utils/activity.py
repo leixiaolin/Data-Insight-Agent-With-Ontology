@@ -12,6 +12,7 @@ DELEGATION_AGENTS = {
 
 _TOOL_LABELS = {
     "execute_sql": "执行只读 SQL",
+    "complete_analysis": "校验分析结论与证据",
     "list_schemas": "查看数据库结构",
     "list_tables": "查看数据表",
     "get_table_details": "核对表结构",

@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import asyncio
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time as _time
 from decimal import Decimal
+from functools import wraps
 import json
 import re
 from typing import Annotated, Any, List, Optional
@@ -43,6 +44,11 @@ from ..data_sources import (
     get_scope_rules,
 )
 from ..prompts import DATA_INSIGHT_AGENT_PROMPT
+from ..ontology.evidence import usable_ontology_context
+from ..analysis_result import (
+    AnalysisCompletion, AnalysisLedger, EvidenceReference, query_has_limit, sql_fingerprint,
+)
+from .analysis_budget import AnalysisChatBudget, AnalysisFunctionBudget
 from ..skills_provider import (
     begin_skill_usage_tracking,
     create_skills_provider,
@@ -323,6 +329,7 @@ class _RecoveryState:
     ontology_attempts: int = 0
     diagnostic_attempts: int = 0
     pending_diagnostic: Optional[dict[str, Any]] = None
+    ledger: AnalysisLedger = field(default_factory=AnalysisLedger)
 
 
 def _json_default(value: Any) -> str:
@@ -400,20 +407,6 @@ class DataInsightAgent:
         )
 
     @staticmethod
-    def _diagnostic_follow_up_message(state: _RecoveryState) -> str:
-        return (
-            "<mandatory_result_diagnostic>\n"
-            "The previous SQL result was analytically degenerate and the first response "
-            "must not be finalized. Using the ontology and verified schema already in this "
-            "session, execute exactly one focused source-level SQL query with "
-            "purpose=\"diagnostic\". Distinguish source equality, aggregation/grain "
-            "collapse, null or mapping gaps, low cardinality, and period/sample coverage. "
-            "Then provide one revised final answer grounded in both query results.\n"
-            f"signals={json.dumps(state.pending_diagnostic or {}, ensure_ascii=False, default=_json_default)}\n"
-            "</mandatory_result_diagnostic>"
-        )
-
-    @staticmethod
     def _original_question(question: str) -> str:
         match = re.search(
             r"(?is)<original_user_question>\s*(.*?)\s*</original_user_question>",
@@ -459,7 +452,7 @@ class DataInsightAgent:
             return "present_unstructured"
         return (
             "ready"
-            if isinstance(parsed.get("primary_business_context"), dict)
+            if usable_ontology_context(parsed)
             else "incomplete"
         )
 
@@ -538,7 +531,7 @@ class DataInsightAgent:
                 f"Skill: {governed_name or 'governed template'} | "
                 "系统默认 / System default | 推断 / Inferred"
             )
-        elif ontology_enabled:
+        elif ontology_status == "ready":
             definition_source = (
                 "available\n"
                 "Business meaning comes from the active ontology. MetadataAgent ran in verification "
@@ -743,6 +736,10 @@ class DataInsightAgent:
                 )
 
             state.ontology_context = recovered
+            if self._ontology_context_status(recovered, ontology_enabled=True, ontology_fallback="") != "ready":
+                state.ontology_context = ""
+                state.ontology_fallback = "Ontology recovery returned no usable business evidence"
+                return self._recovery_result("no_match", "OntologyAgent", message=state.ontology_fallback)
             return self._recovery_result(
                 "ok",
                 "OntologyAgent",
@@ -750,6 +747,43 @@ class DataInsightAgent:
                 context=recovered,
             )
 
+        def complete_analysis(
+            status: Annotated[str, Field(description="completed, partial, or insufficient")],
+            answer: Annotated[str, Field(description="User-facing answer grounded in the evidence")],
+            evidence: Annotated[list[EvidenceReference], Field(description="Successful result IDs and the claims they support")],
+            gaps: Annotated[list[str], Field(description="Unresolved definitions, mappings, or coverage limits; empty only for completed")],
+        ) -> str:
+            """Submit the final analysis with verifiable SQL evidence; do not finish with prose alone."""
+            state = self._recovery_state.get()
+            if state is None:
+                return "BLOCKED: No active analysis request."
+            with state.ledger.lock:
+                return state.ledger.complete(
+                    status, answer, [EvidenceReference.model_validate(ref) for ref in evidence], gaps,
+                    pending_diagnostic=state.pending_diagnostic is not None,
+                )
+
+        def observe_sql(function):
+            @wraps(function)
+            def observed(*args, **kwargs):
+                state = self._recovery_state.get()
+                if state is None:
+                    return function(*args, **kwargs)
+                with state.ledger.lock:
+                    call_id = f"sql-{len(state.ledger.attempts) + 1}"
+                    logger.info("analysis request=%s call=%s stage=invoked", state.ledger.trace, call_id)
+                    result = function(*args, **kwargs)
+                    failed = not result.startswith("Query returned")
+                    category = ("blocked" if result.startswith("BLOCKED:") else "execution_failed") if failed else ""
+                    state.ledger.attempts.append({"call_id": call_id, "success": not failed, "error_category": category})
+                    if failed:
+                        state.ledger.last_error = category
+                    logger.info("analysis request=%s call=%s stage=returned error_category=%s",
+                                state.ledger.trace, call_id, category)
+                    return result
+            return observed
+
+        @observe_sql
         def execute_sql(
             sql: Annotated[
                 str,
@@ -763,7 +797,7 @@ class DataInsightAgent:
                 str,
                 Field(
                     description=(
-                        "Use 'analysis' for the requested result or 'diagnostic' for the one "
+                        "Use 'exploration' for candidate discovery, 'analysis' for the requested result or 'diagnostic' for the one "
                         "required follow-up after a degenerate result"
                     )
                 ),
@@ -774,17 +808,12 @@ class DataInsightAgent:
             Only SELECT statements are permitted. Always use fully-qualified table names
             (catalog.schema.table).
             """
-            logger.info(
-                "[Tool:execute_sql] Executing SQL (purpose=%s, max_rows=%s):\n%s",
-                purpose,
-                max_rows,
-                sql,
-            )
-
             state = self._recovery_state.get()
+            if state is not None and state.ledger.completion is not None:
+                return "BLOCKED: Analysis already finalized."
             normalized_purpose = str(purpose or "analysis").strip().lower()
-            if normalized_purpose not in {"analysis", "diagnostic"}:
-                return "BLOCKED: purpose must be either 'analysis' or 'diagnostic'."
+            if normalized_purpose not in {"exploration", "analysis", "diagnostic"}:
+                return "BLOCKED: purpose must be exploration, analysis, or diagnostic."
             if (
                 state is not None
                 and state.pending_diagnostic is not None
@@ -794,18 +823,6 @@ class DataInsightAgent:
                     "BLOCKED: The previous result was analytically degenerate. Execute one "
                     "focused source-level query with purpose='diagnostic' before finalizing."
                 )
-            if (
-                state is not None
-                and normalized_purpose == "diagnostic"
-                and state.diagnostic_attempts >= 1
-            ):
-                return "BLOCKED: The one allowed diagnostic SQL query was already executed."
-            if (
-                state is not None
-                and normalized_purpose == "diagnostic"
-                and state.pending_diagnostic is None
-            ):
-                return "BLOCKED: No degenerate result is awaiting a diagnostic query."
             required_skill = "sql-planning"
             required_resource = ""
             if state is not None and state.governed_skill_context:
@@ -891,9 +908,29 @@ class DataInsightAgent:
                     )
                     if corrections:
                         logger.info(
-                            "[Tool:execute_sql] Corrected SQL identifiers from UC metadata: %s",
-                            corrections,
+                            "[Tool:execute_sql] Corrected %s SQL identifiers from metadata",
+                            len(corrections),
                         )
+                # Revalidate rewritten identifiers before cache lookup or execution.
+                scope_error = _validate_sql_scope(active_sql)
+                if scope_error:
+                    return scope_error
+                fingerprint = sql_fingerprint(
+                    active_sql, source=active_source.name,
+                    dialect=get_scope_rules().sqlglot_dialect,
+                    max_rows=max_rows, purpose=normalized_purpose,
+                )
+                if state is not None:
+                    logger.info("analysis request=%s stage=validated fingerprint=%s purpose=%s",
+                                state.ledger.trace, fingerprint, normalized_purpose)
+                    if fingerprint and fingerprint in state.ledger.reusable:
+                        logger.info("analysis request=%s stage=reused fingerprint=%s", state.ledger.trace, fingerprint)
+                        return state.ledger.reusable[fingerprint]
+                    if normalized_purpose == "diagnostic":
+                        if state.diagnostic_attempts >= 1:
+                            return "BLOCKED: The one allowed diagnostic SQL query was already executed."
+                        if state.pending_diagnostic is None:
+                            return "BLOCKED: No degenerate result is awaiting a diagnostic query."
                 try:
                     executed_sql = active_sql
                     result = active_source.execute_query(
@@ -912,7 +949,9 @@ class DataInsightAgent:
                             logger.warning(
                                 "[Tool:execute_sql] Retrying after rewriting unsupported QUALIFY aggregate pattern."
                             )
-                            logger.info(f"[Tool:execute_sql] Rewritten SQL:\n{rewritten}")
+                            scope_error = _validate_sql_scope(rewritten)
+                            if scope_error:
+                                return scope_error
                             executed_sql = rewritten
                             result = active_source.execute_query(
                                 rewritten, max_rows=max_rows
@@ -930,6 +969,8 @@ class DataInsightAgent:
                     rows,
                     question=state.question if state is not None else "",
                 )
+                if normalized_purpose == "exploration":
+                    diagnostics["requires_follow_up"] = False
                 if state is not None and normalized_purpose == "diagnostic":
                     state.diagnostic_attempts += 1
                     state.pending_diagnostic = None
@@ -972,8 +1013,34 @@ class DataInsightAgent:
                         + "\n</measures_used>"
                     )
 
+                if state is not None:
+                    executed_fingerprint = sql_fingerprint(
+                        executed_sql, source=active_source.name,
+                        dialect=get_scope_rules().sqlglot_dialect,
+                        max_rows=max_rows, purpose=normalized_purpose,
+                    )
+                    record = state.ledger.record(
+                        purpose=normalized_purpose, fingerprint=executed_fingerprint,
+                        row_count=row_count,
+                        truncated=(row_count >= max_rows or row_count > 20
+                                   or query_has_limit(executed_sql, get_scope_rules().sqlglot_dialect)),
+                        requires_follow_up=diagnostics["requires_follow_up"],
+                    )
+                    diagnostic_block += "\n\n<query_evidence>" + json.dumps({
+                        "result_id": record.result_id, "purpose": record.purpose,
+                        "row_count": row_count, "truncated_or_limited": record.truncated,
+                        "fingerprint": executed_fingerprint,
+                    }) + "</query_evidence>"
+                    logger.info("analysis request=%s stage=executed result=%s rows=%s limited=%s",
+                                state.ledger.trace, record.result_id, row_count, record.truncated)
+
+                def completed_output(text: str) -> str:
+                    if state is not None and fingerprint:
+                        state.ledger.reusable[fingerprint] = text
+                    return text
+
                 if not rows:
-                    return f"Query returned 0 rows.{diagnostic_block}"
+                    return completed_output(f"Query returned 0 rows.{diagnostic_block}")
 
                 # Build markdown table for small results
                 if row_count <= 20:
@@ -985,7 +1052,7 @@ class DataInsightAgent:
                     table = "\n".join([header, separator] + body_lines)
                     # Note: SQL is intentionally excluded here — it is already shown
                     # in the thinking panel via the execute_sql thinking event.
-                    return f"Query returned {row_count} row(s).\n\n{table}{diagnostic_block}"
+                    return completed_output(f"Query returned {row_count} row(s).\n\n{table}{diagnostic_block}")
                 else:
                     # Summarise large results as JSON (no SQL block — shown in thinking)
                     summary = json.dumps(
@@ -994,22 +1061,23 @@ class DataInsightAgent:
                         indent=2,
                         default=_json_default,
                     )
-                    return (
+                    return completed_output(
                         f"Query returned {row_count} row(s) (showing first 5 of {row_count}).\n\n"
                         f"```json\n{summary}\n```{diagnostic_block}"
                     )
 
             except RuntimeError as exc:
-                logger.error(f"[Tool:execute_sql] RuntimeError: {exc}")
-                return f"Configuration error: {exc}"
+                logger.error("[Tool:execute_sql] Configuration error (%s)", type(exc).__name__)
+                return "Configuration error: data source unavailable; check server configuration."
             except Exception as exc:
-                logger.error(f"[Tool:execute_sql] Unexpected error: {exc}", exc_info=True)
-                return f"Query execution failed: {exc}"
+                logger.error("[Tool:execute_sql] Query execution failed (%s)", type(exc).__name__)
+                return f"Query execution failed: {type(exc).__name__}. Verify SQL and the schema."
 
         return [
             recover_metadata_context,
             recover_ontology_context,
             execute_sql,
+            complete_analysis,
         ]
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1032,6 +1100,10 @@ class DataInsightAgent:
             # variance here makes the same question return a different 口径 on every run.
             reasoning_effort=AgentReasoningConfig.DATA_INSIGHT,
             context_providers=[skills_provider] if skills_provider else None,
+            middleware=[
+                AnalysisFunctionBudget(lambda: self._recovery_state.get().ledger if self._recovery_state.get() else None),
+                AnalysisChatBudget(lambda: self._recovery_state.get().ledger if self._recovery_state.get() else None),
+            ],
         )
         logger.info("DataInsightAgent created with MAF OpenAIChatCompletionClient.")
         return agent
@@ -1087,14 +1159,9 @@ class DataInsightAgent:
                 full_question,
                 session=active_session,
             )
-            if state.pending_diagnostic is not None:
-                result = await run_agent(
-                    self.agent,
-                    self._diagnostic_follow_up_message(state),
-                    session=active_session,
-                )
-            logger.info(f"DataInsightAgent.query completed, len={len(result.text)}")
-            return result.text
+            completion = state.ledger.finish(result.text)
+            logger.info("analysis request=%s status=%s reason=%s", state.ledger.trace, completion.status, completion.reason)
+            return completion.answer
         finally:
             reset_skill_usage_tracking(skill_token)
             self._recovery_state.reset(token)
@@ -1109,6 +1176,7 @@ class DataInsightAgent:
         ontology_enabled: bool = False,
         governed_skill_context: str = "",
         business_layer: str = "",
+        result_sink: Optional[list[AnalysisCompletion]] = None,
     ):
         """
         Streaming version of :meth:`query`.  Yields MAF update objects.
@@ -1128,19 +1196,23 @@ class DataInsightAgent:
         skill_token = begin_skill_usage_tracking()
         try:
             active_session = thread or self.get_new_thread()
+            trailing_text: list[str] = []
             async for update in stream_agent(
                 self.agent,
                 full_question,
                 session=active_session,
             ):
+                if getattr(update, "text", ""):
+                    trailing_text.append(update.text)
+                if any(getattr(content, "type", "") == "function_call" for content in getattr(update, "contents", []) or []):
+                    trailing_text.clear()
                 yield update
-            if state.pending_diagnostic is not None:
-                async for update in stream_agent(
-                    self.agent,
-                    self._diagnostic_follow_up_message(state),
-                    session=active_session,
-                ):
-                    yield update
+            completion = state.ledger.finish("".join(trailing_text))
+            if result_sink is not None:
+                result_sink.append(completion)
+            logger.info("analysis request=%s status=%s reason=%s calls=%s rounds=%s",
+                        state.ledger.trace, completion.status, completion.reason,
+                        state.ledger.function_calls, state.ledger.model_roundtrips)
         finally:
             reset_skill_usage_tracking(skill_token)
             self._recovery_state.reset(token)

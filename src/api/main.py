@@ -76,6 +76,7 @@ from src.utils.activity import (
     tool_activity,
 )
 from src.skills_provider import list_skill_metadata
+from src.analysis_result import contains_tool_protocol, request_trace
 
 logger = get_logger(__name__)
 
@@ -254,6 +255,8 @@ def _response_cache_eligibility(response: str) -> tuple[bool, str]:
     text = unicodedata.normalize("NFKC", str(response or "")).strip()
     if not text:
         return False, "empty_response"
+    if contains_tool_protocol(text):
+        return False, "invalid_tool_output"
     if any(pattern.search(text) for pattern in _CACHE_FAILURE_PATTERNS):
         return False, "failure_response"
     return True, "completed_response"
@@ -283,6 +286,7 @@ def _find_cached_response(
             _normalize_cache_question(str(turn.get("user") or "")) == cache_key
             and str(turn.get("assistant") or "").strip()
             and turn.get("cache_eligible") is True
+            and turn.get("analysis_status") == "completed"
             and turn.get("enable_ontology") is enable_ontology
         ):
             return str(turn["assistant"])
@@ -354,7 +358,7 @@ async def _cached_response_stream(
         enable_ontology=enable_ontology,
     )
     yield _sse({"type": "thinking_done"})
-    yield _sse({"type": "done", "content": cached_response, "cache_hit": True})
+    yield _sse({"type": "done", "content": cached_response, "cache_hit": True, "analysis_status": "completed"})
 
 
 def _table_row_cells(row: str) -> Optional[List[str]]:
@@ -455,6 +459,8 @@ async def _stream_agent_response(
     _working_text_parts: List[str] = []
     _working_text_id = 1
     cache_failure_observed = False
+    analysis_requested = False
+    analysis_result: Optional[dict] = None
 
     # ── Single combined queue — avoids all polling ────────────────────────────
     combined: asyncio.Queue = asyncio.Queue()
@@ -462,6 +468,7 @@ async def _stream_agent_response(
 
     async def feed_master():
         """Push every MAF update from chat_stream into the combined queue."""
+        trace_token = request_trace.set((thread_id, active_run.run_id))
         stream = state.master_agent.chat_stream(
             message=message,
             thread=thread,
@@ -485,6 +492,7 @@ async def _stream_agent_response(
                 pass
             if not active_run.cancel_event.is_set():
                 await combined.put(("done", None))
+            request_trace.reset(trace_token)
 
     master_task = asyncio.create_task(feed_master())
     active_run.task = master_task
@@ -526,6 +534,8 @@ async def _stream_agent_response(
             return []
         raw_text = "".join(_working_text_parts)
         text = raw_text.strip()
+        if contains_tool_protocol(text):
+            text = "模型输出格式异常，正在检查分析状态。"
         segment_id = f"narration-{_working_text_id}"
         _working_text_id += 1
         _working_text_parts = []
@@ -577,13 +587,13 @@ async def _stream_agent_response(
         """Convert one MAF update object → list of SSE strings."""
         nonlocal _pending_call_id, _pending_call_name, _pending_call_args
         nonlocal cache_failure_observed
+        nonlocal analysis_requested
         events: List[str] = []
 
-        # Ordinary assistant text is streamed immediately. If a tool call follows,
-        # it is reclassified as working narration; the final trailing segment remains the answer.
+        # Hold each text segment until its role and protocol validity are known.
+        # This also catches tool markup split across provider chunks.
         if hasattr(update, "text") and update.text:
             _working_text_parts.append(update.text)
-            events.append(_sse({"type": "text", "content": update.text}))
 
         if not (hasattr(update, "contents") and update.contents):
             return events
@@ -599,6 +609,8 @@ async def _stream_agent_response(
 
             if ct == "function_call":
                 tname = getattr(content, "name", "") or ""
+                if tname == "delegate_data_analysis":
+                    analysis_requested = True
                 targs = getattr(content, "arguments", "") or ""
 
                 if tname and tname != _pending_call_name:
@@ -659,10 +671,13 @@ async def _stream_agent_response(
             elif item_type == "text":
                 # DataInsightAgent or MetadataAgent streaming text
                 full_response_parts.append(item_data)
-                yield _sse({"type": "text", "content": item_data})
+
+            elif item_type == "analysis_result" and isinstance(item_data, dict):
+                analysis_result = item_data
+                analysis_requested = True
 
             elif item_type == "activity" and isinstance(item_data, dict):
-                if item_data.get("state") == "error":
+                if item_data.get("state") == "error" and item_data.get("agent") != "OntologyAgent":
                     cache_failure_observed = True
                 yield _sse({"type": "thinking", **item_data})
 
@@ -689,6 +704,16 @@ async def _stream_agent_response(
 
     # ── Post-process final response ───────────────────────────────────────────
     full_response = "".join(full_response_parts)
+    analysis_status = "completed"
+    if analysis_result is not None:
+        analysis_status = analysis_result["analysis_status"]
+        full_response = analysis_result["content"]
+    elif analysis_requested:
+        analysis_status = "failed"
+        full_response = "分析未完成：未收到通过证据校验的最终结论，请查看工作过程中的失败原因。"
+    if contains_tool_protocol(full_response) or not full_response.strip():
+        analysis_status = "failed"
+        full_response = "分析未完成：模型未返回有效的自然语言结论。"
 
     # Models occasionally preserve table pipes but collapse all row newlines.
     # Repair that narrow malformed shape before the response is returned.
@@ -706,11 +731,13 @@ async def _stream_agent_response(
         message,
         full_response,
         enable_ontology=enable_ontology,
-        cache_eligible=(response_cache_eligible and not cache_failure_observed),
+        cache_eligible=(response_cache_eligible and not cache_failure_observed and analysis_status == "completed"),
+        analysis_status=analysis_status,
     )
 
     yield _sse({"type": "thinking_done"})
-    yield _sse({"type": "done", "content": full_response})
+    yield _sse({"type": "text", "content": full_response})
+    yield _sse({"type": "done", "content": full_response, "analysis_status": analysis_status})
 
 
 
@@ -741,6 +768,7 @@ def _append_history(
     cache_hit: bool = False,
     enable_ontology: bool,
     cache_eligible: Optional[bool] = None,
+    analysis_status: str = "completed",
 ) -> None:
     """Store a completed turn in the thread history."""
     if thread_id not in state.thread_history:
@@ -754,6 +782,9 @@ def _append_history(
     if cache_hit:
         effective_eligible = True
         eligibility_reason = "cache_hit"
+    if analysis_status != "completed":
+        effective_eligible = False
+        eligibility_reason = "analysis_incomplete"
     elif not effective_eligible and eligibility_reason == "completed_response":
         eligibility_reason = "explicitly_ineligible"
     state.thread_history[thread_id].append(
@@ -765,6 +796,7 @@ def _append_history(
             "cache_eligible": effective_eligible,
             "cache_eligibility_reason": eligibility_reason,
             "enable_ontology": enable_ontology,
+            "analysis_status": analysis_status,
         }
     )
 

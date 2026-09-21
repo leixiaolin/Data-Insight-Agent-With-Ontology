@@ -1,3 +1,5 @@
+import type { AnalysisStatus } from '../types';
+
 export type ActivityKind =
   | 'narration'
   | 'agent'
@@ -20,6 +22,6 @@ export interface ActivityItem {
   detail?: string;
   summary?: string;
   durationMs?: number;
-  metrics: Record<string, unknown>;
+  metrics: Record<string, unknown> & { analysis_status?: AnalysisStatus };
   timestamp: string;
 }

@@ -17,7 +17,9 @@ def _reset_factory():
     ds._active_provider = None
 
 
-def test_databricks_data_insight_block_matches_previous_hardcoded_string() -> None:
+def test_databricks_data_insight_block_matches_previous_hardcoded_string(monkeypatch) -> None:
+    monkeypatch.setattr(DataSourceConfig, "TYPE", "databricks")
+    monkeypatch.setattr(DataSourceConfig, "RAW_TYPE", "databricks")
     schemas_list = ", ".join(f"`{s}`" for s in DatabricksConfig.SCHEMAS)
     previous_hardcoded = (
         f"\n\n## Databricks Context\n"
@@ -31,7 +33,9 @@ def test_databricks_data_insight_block_matches_previous_hardcoded_string() -> No
     assert ds.build_identity_block("data_insight") == previous_hardcoded
 
 
-def test_databricks_metadata_block_matches_previous_hardcoded_string() -> None:
+def test_databricks_metadata_block_matches_previous_hardcoded_string(monkeypatch) -> None:
+    monkeypatch.setattr(DataSourceConfig, "TYPE", "databricks")
+    monkeypatch.setattr(DataSourceConfig, "RAW_TYPE", "databricks")
     previous_hardcoded = (
         f"\n\n## Databricks Context\n"
         f"- Default catalog: `{DatabricksConfig.CATALOG}`\n"

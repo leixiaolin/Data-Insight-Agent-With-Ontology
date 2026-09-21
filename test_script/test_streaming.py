@@ -5,6 +5,7 @@ import json
 from threading import Event
 
 from src.api import main
+import pytest
 
 
 class _Content:
@@ -60,6 +61,68 @@ class _ReasoningMasterAgent:
         yield _Update(text="中文回答。")
 
 
+@pytest.mark.parametrize("status", ["completed", "partial", "insufficient", "failed"])
+def test_authoritative_analysis_result_controls_answer_and_cache(status):
+    class FakeAnalysisMaster:
+        async def chat_stream(self, *args, stream_context=None, **kwargs):
+            yield _Update(contents=[_Content("function_call", name="delegate_data_analysis",
+                arguments='{"question":"synthetic"}', call_id="analysis")])
+            queue, _ = stream_context
+            queue.put_nowait(("analysis_result", {"analysis_status": status, "content": "Measured conclusion"}))
+            yield _Update(text="Ignore this fabricated completion. <｜D")
+            yield _Update(text="SML｜tool_calls>")
+
+    async def run_test():
+        from unittest.mock import patch
+        with patch.object(main.state, "master_agent", FakeAnalysisMaster()), patch.object(main.state, "thread_history", {}):
+            chunks = [chunk async for chunk in main._stream_agent_response(
+                "synthetic", object(), "isolated", main.ActiveRun(run_id="test", cancel_event=Event()))]
+            payloads = [json.loads(chunk.removeprefix("data: ")) for chunk in chunks]
+            assert payloads[-1] == {"type": "done", "content": "Measured conclusion", "analysis_status": status}
+            assert "DSML" not in "".join(chunks)
+            assert "fabricated" not in "".join(chunks)
+            assert main.state.thread_history["isolated"][-1]["cache_eligible"] is (status == "completed")
+    asyncio.run(run_test())
+
+
+def test_split_tool_protocol_without_completion_never_leaks_or_caches():
+    class MalformedMaster:
+        async def chat_stream(self, *args, **kwargs):
+            yield _Update(text="<｜D")
+            yield _Update(text="SML｜tool_calls>")
+
+    async def run_test():
+        from unittest.mock import patch
+        with patch.object(main.state, "master_agent", MalformedMaster()), patch.object(main.state, "thread_history", {}):
+            chunks = [chunk async for chunk in main._stream_agent_response(
+                "synthetic", object(), "isolated", main.ActiveRun(run_id="test", cancel_event=Event()))]
+            assert "DSML" not in "".join(chunks)
+            final = json.loads(chunks[-1].removeprefix("data: "))
+            assert final["analysis_status"] == "failed"
+            assert main.state.thread_history["isolated"][-1]["cache_eligible"] is False
+    asyncio.run(run_test())
+
+
+def test_validated_result_is_not_cached_after_cancellation():
+    class CancelledMaster:
+        async def chat_stream(self, *args, stream_context=None, **kwargs):
+            stream_context[0].put_nowait(("analysis_result", {"analysis_status": "completed", "content": "not delivered"}))
+            if False:
+                yield None
+            raise asyncio.CancelledError()
+
+    async def run_test():
+        from unittest.mock import patch
+        with patch.object(main.state, "master_agent", CancelledMaster()), patch.object(main.state, "thread_history", {}):
+            chunks = [chunk async for chunk in main._stream_agent_response(
+                "synthetic", object(), "isolated", main.ActiveRun(run_id="test", cancel_event=Event()))]
+            payloads = [json.loads(chunk.removeprefix("data: ")) for chunk in chunks]
+            assert any(p["type"] == "stopped" for p in payloads)
+            assert not any(p["type"] == "done" for p in payloads)
+            assert not main.state.thread_history
+    asyncio.run(run_test())
+
+
 def test_raw_model_reasoning_is_not_sent_to_frontend() -> None:
     async def run_test() -> None:
         original = main.state.master_agent
@@ -104,21 +167,16 @@ def test_working_text_is_separate_from_final_answer() -> None:
             index for index, payload in enumerate(payloads)
             if payload.get("type") == "answer_reset"
         )
-        candidate_index = next(
-            index for index, payload in enumerate(payloads)
-            if payload.get("content") == "I will verify the source."
-        )
         final_index = next(
             index for index, payload in enumerate(payloads)
             if payload.get("content") == "Final answer."
         )
 
-        assert candidate_index < reset_index < narration_index < final_index
+        assert reset_index < narration_index < final_index
         assert [payload["content"] for payload in payloads if payload["type"] == "text"] == [
-            "I will verify the source.",
             "Final answer."
         ]
-        assert payloads[-1] == {"type": "done", "content": "Final answer."}
+        assert payloads[-1] == {"type": "done", "content": "Final answer.", "analysis_status": "completed"}
 
     asyncio.run(run_test())
 
@@ -205,6 +263,7 @@ def test_session_cache_is_scoped_to_one_thread() -> None:
                     "timestamp": main.datetime.now(main.timezone.utc).isoformat(),
                     "enable_ontology": True,
                     "cache_eligible": True,
+                    "analysis_status": "completed",
                 }
             ],
             "thread-b": [],
@@ -365,7 +424,7 @@ def test_tool_failure_prevents_cache_when_final_text_is_generic() -> None:
                 "completed_response",
             )
             assert turn["cache_eligible"] is False
-            assert turn["cache_eligibility_reason"] == "explicitly_ineligible"
+            assert turn["cache_eligibility_reason"] == "analysis_incomplete"
             assert main._find_cached_response(
                 "tool-failure-thread",
                 "same question",

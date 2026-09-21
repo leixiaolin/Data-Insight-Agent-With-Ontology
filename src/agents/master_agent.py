@@ -16,6 +16,8 @@ from .ontology_agent import OntologyAgent
 from ..config import AgentReasoningConfig, AppConfig, DatabricksConfig, OntologyConfig
 from ..prompts import MASTER_AGENT_PROMPT
 from ..query_engine import QueryEngineContext
+from ..ontology.evidence import usable_ontology_context
+from ..analysis_result import AnalysisCompletion, AnalysisLedger, contains_tool_protocol
 from ..skills_provider import (
     configured_skill_names,
     configured_skill_resource_exists,
@@ -403,7 +405,7 @@ class MasterAgent:
             def tool_result_failed(name: str, result: Any, exception: Any) -> bool:
                 if exception:
                     return True
-                if name != "execute_sql":
+                if name not in {"execute_sql", "complete_analysis"}:
                     return False
                 result_text = str(result or "").lower()
                 return any(
@@ -425,6 +427,8 @@ class MasterAgent:
                 text = raw_text.strip()
                 if not text:
                     return
+                if contains_tool_protocol(text):
+                    text = "模型输出格式异常，正在检查分析状态。"
                 push_stream_event(
                     "activity",
                     narration_activity(
@@ -734,6 +738,11 @@ class MasterAgent:
                 for item in tool_results
                 if isinstance(item.get("result"), dict)
             )
+            full_schema_recall = any(
+                isinstance(item.get("result"), dict)
+                and item["result"].get("selection_basis") == "no_match_full_schema"
+                for item in tool_results
+            )
 
             finish_agent_activity(
                 agent_activity_id,
@@ -743,17 +752,18 @@ class MasterAgent:
                 summary=(
                     (
                         (
-                            "第 2 步完成：MetadataAgent 已核对本体线索与物理表结构"
+                            "第 2 步完成：MetadataAgent 已读取物理表结构，本体映射仍需逐项核验"
                         )
                         if ontology_context
                         else "第 1 步完成：MetadataAgent 已确认物理表结构"
                     )
-                    + (
+                    if not full_schema_recall
+                    else "MetadataAgent 已读取全部候选表，业务映射需按分析计划核验"
+                ) + (
                         "；已选择 "
                         + ", ".join(name.rsplit(".", 1)[-1] for name in selected_tables)
                         if selected_tables
                         else ""
-                    )
                 ),
                 metrics={
                     "tool_result_count": len(tool_results),
@@ -1011,19 +1021,15 @@ class MasterAgent:
                 )
                 return normalized_result
 
-            primary_context = parsed.get("primary_business_context")
-            usable = bool(result_container["tool_results"]) and isinstance(
-                primary_context,
-                dict,
-            )
+            usable = bool(result_container["tool_results"]) and usable_ontology_context(parsed)
             if not usable or parsed.get("status") == "error":
-                reason = "OntologyAgent returned no usable business context"
+                reason = "OntologyAgent returned no usable business context (no matched evidence)"
                 finish_agent_activity(
                     agent_activity_id,
                     "OntologyAgent",
                     question,
                     agent_started_at,
-                    error=True,
+                    error=parsed.get("status") not in {"no_match", "no_tool_results"},
                     summary=reason,
                 )
                 self._record_tool_outcome(
@@ -1121,6 +1127,7 @@ class MasterAgent:
             )
             error_container: Dict[str, Any] = {"error": None}
             result_container: Dict[str, Any] = {"result": "", "loop": None, "task": None}
+            completion_sink: list[AnalysisCompletion] = []
             turn = self._current_turn()
             original_user_question = (
                 turn.original_question.strip()
@@ -1151,10 +1158,11 @@ class MasterAgent:
                                 ontology_enabled=ontology_enabled,
                                 governed_skill_context=governed_skill_context,
                                 business_layer=business_layer,
+                                result_sink=completion_sink,
                             ),
                             agent="DataInsightAgent",
                             parent_id=agent_activity_id,
-                            stream_final_text=True,
+                            stream_final_text=False,
                         )
                     )
                     result_container["task"] = task
@@ -1212,39 +1220,35 @@ class MasterAgent:
                 )
                 return f"DataInsightAgent error: {error_container['error']}"
 
-            result = result_container["result"].strip()
-            if not result:
-                finish_agent_activity(
-                    agent_activity_id,
-                    "DataInsightAgent",
-                    question,
-                    agent_started_at,
-                    error=True,
-                    summary="未返回分析结果",
-                )
-                self._record_tool_outcome(
-                    "data_insight",
-                    success=False,
-                    summary="DataInsightAgent 未返回结果",
-                    started_at=tool_started_at,
-                )
-                return "DataInsightAgent returned no results."
-
+            completion = completion_sink[-1] if completion_sink else AnalysisLedger().finish(result_container["result"])
+            if turn is not None:
+                turn.analysis_result = completion
+            push_stream_event("analysis_result", completion.public_payload())
+            success = completion.status == "completed"
+            status_summary = {
+                "completed": "分析已完成，结论已关联执行证据",
+                "partial": "已找到部分线索，仍有未解决限制",
+                "insufficient": "证据不足，暂不能完成判定",
+                "failed": "分析未完成，未生成有效结论",
+            }[completion.status]
             finish_agent_activity(
                 agent_activity_id,
                 "DataInsightAgent",
                 question,
                 agent_started_at,
-                summary="最后一步完成：SQL 分析已结束",
+                error=not success,
+                summary=status_summary,
+                metrics={"analysis_status": completion.status},
             )
             self._record_tool_outcome(
                 "data_insight",
-                success=True,
-                summary="DataInsightAgent 已完成分析",
-                metadata={"result_chars": len(result)},
+                success=success,
+                summary=status_summary,
+                metadata={"analysis_status": completion.status},
                 started_at=tool_started_at,
             )
-            return "[STREAMED] DataInsightAgent has completed analysis and streamed the full result to the user."
+            return json.dumps({"answer_streamed": True, "analysis_status": completion.status,
+                               "instruction": "The authoritative answer was delivered. Do not restate it or claim success."})
 
         def delegate_data_analysis(
             question: Annotated[
@@ -1395,13 +1399,15 @@ class MasterAgent:
                     ontology_enabled=ontology_requested,
                     governed_skill_context=governed_skill_context,
                 )
-                success = result.startswith("[STREAMED]")
+                success = turn is not None and turn.analysis_result is not None and turn.analysis_result.status == "completed"
                 pipeline_metadata = {
                     "ontology_requested": ontology_requested,
                     "ontology_applied": bool(ontology_context),
                     "fallback_used": bool(ontology_fallback),
                     "skill_fast_path": bool(governed_skill_context),
                 }
+                if turn is not None and turn.analysis_result is not None:
+                    pipeline_metadata["analysis_status"] = turn.analysis_result.status
                 self._record_tool_outcome(
                     "delegate_data_analysis",
                     success=success,
@@ -1423,7 +1429,7 @@ class MasterAgent:
                                 else "OntologyAgent → MetadataAgent → DataInsightAgent completed in sequence"
                                 if ontology_context
                                 else (
-                                    "OntologyAgent failed → MetadataAgent → DataInsightAgent fallback completed"
+                                    "Ontology unavailable → MetadataAgent → DataInsightAgent fallback completed"
                                     if ontology_fallback
                                     else "MetadataAgent → DataInsightAgent completed in sequence"
                                 )

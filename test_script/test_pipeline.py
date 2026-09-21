@@ -28,6 +28,18 @@ from src.skills_provider import (
     reset_skill_usage_tracking,
 )
 from src.utils.activity import ontology_tool_result_fields
+from src.analysis_result import AnalysisCompletion
+
+
+@pytest.fixture(autouse=True)
+def isolated_databricks_source(monkeypatch):
+    """These fixtures describe Databricks, independent of the user's active backend."""
+    import src.data_sources as sources
+    from src.config import DataSourceConfig
+    monkeypatch.setattr(DataSourceConfig, "TYPE", "databricks")
+    monkeypatch.setattr(DataSourceConfig, "RAW_TYPE", "databricks")
+    monkeypatch.setattr(sources, "_active_source", None)
+    monkeypatch.setattr(sources, "_active_provider", None)
 
 
 class _MetadataAgent:
@@ -95,6 +107,7 @@ class _DataInsightAgent:
         ontology_enabled=False,
         governed_skill_context="",
         business_layer="",
+        result_sink=None,
     ):
         self.calls.append(
             {
@@ -108,6 +121,8 @@ class _DataInsightAgent:
                 "business_layer": business_layer,
             }
         )
+        if result_sink is not None:
+            result_sink.append(AnalysisCompletion("completed", "analysis result"))
         yield SimpleNamespace(text="analysis result", contents=[])
 
 
@@ -131,6 +146,8 @@ class _OntologyAgent:
         )
         try:
             payload = __import__("json").loads(self.result)
+            if isinstance(payload, dict) and payload.get("root_entity"):
+                payload.setdefault("status", "ok")
         except Exception:
             payload = None
         if context_sink is not None and payload is not None:
@@ -276,6 +293,7 @@ def test_data_insight_exposes_bounded_recovery_and_sql_tools() -> None:
         "recover_metadata_context",
         "recover_ontology_context",
         "execute_sql",
+        "complete_analysis",
     ]
 
 
@@ -387,7 +405,7 @@ def test_result_diagnostics_flags_low_sample_only_for_multi_observation_intent()
 
 
 @pytest.mark.asyncio
-async def test_data_insight_automatically_continues_pending_diagnostic_in_same_session(
+async def test_data_insight_does_not_start_new_loop_for_pending_diagnostic(
     monkeypatch,
 ) -> None:
     agent = DataInsightAgent.__new__(DataInsightAgent)
@@ -422,15 +440,13 @@ async def test_data_insight_automatically_continues_pending_diagnostic_in_same_s
         ontology_enabled=False,
     )
 
-    assert result == "diagnostic-grounded answer"
-    assert len(calls) == 2
-    assert calls[0][1] is session and calls[1][1] is session
-    assert "<mandatory_result_diagnostic>" in calls[1][0]
-    assert "all_comparison_values_zero" in calls[1][0]
+    assert "未提交通过证据校验" in result
+    assert len(calls) == 1
+    assert calls[0][1] is session
 
 
 @pytest.mark.asyncio
-async def test_data_insight_stream_automatically_continues_pending_diagnostic(
+async def test_data_insight_stream_reports_pending_diagnostic_without_new_loop(
     monkeypatch,
 ) -> None:
     agent = DataInsightAgent.__new__(DataInsightAgent)
@@ -464,6 +480,7 @@ async def test_data_insight_stream_automatically_continues_pending_diagnostic(
         fake_stream_agent,
     )
 
+    sink = []
     texts = [
         update.text
         async for update in agent.query_stream(
@@ -471,13 +488,14 @@ async def test_data_insight_stream_automatically_continues_pending_diagnostic(
             thread=session,
             schema_context="verified schema",
             ontology_enabled=False,
+            result_sink=sink,
         )
     ]
 
-    assert texts == ["premature stream", "diagnostic stream"]
-    assert len(calls) == 2
-    assert calls[0][1] is session and calls[1][1] is session
-    assert "<mandatory_result_diagnostic>" in calls[1][0]
+    assert texts == ["premature stream"]
+    assert len(calls) == 1
+    assert calls[0][1] is session
+    assert sink[0].status == "failed"
 
 
 @pytest.mark.asyncio
@@ -795,7 +813,7 @@ def test_deterministic_ontology_lookups_remain_visible_in_activity() -> None:
         if tool.__name__ == "delegate_data_analysis"
     )
     try:
-        assert pipeline("2023 category sales").startswith("[STREAMED]")
+        assert json.loads(pipeline("2023 category sales"))["analysis_status"] == "completed"
     finally:
         context_var.reset(token)
 
@@ -863,7 +881,7 @@ async def test_data_insight_recovers_missing_context_inside_its_loop() -> None:
         return json.dumps(
             {
                 "status": "ok",
-                "primary_business_context": {"root_entity": "SalesOrder"},
+                "primary_business_context": {"status": "ok", "root_entity": "SalesOrder"},
                 "all_tool_results": [],
             }
         )
@@ -1039,14 +1057,14 @@ def test_definition_provenance_is_declared_symmetrically() -> None:
 
     ontology_on = build(
         ontology_enabled=True,
-        ontology_context='{"primary_business_context": {}}',
+        ontology_context='{"status":"ok","primary_business_context":{"status":"ok","data":{"root_entity":"SalesOrder"}}}',
     )
     assert "governed_definitions=available" in ontology_on
     assert "本体 / Ontology" in ontology_on
     # The verifier runs without the glossary, so it is not a claimable source.
     assert "Skill: metadata-mapping" not in ontology_on
 
-    assert "governed_definitions=available" in build(
+    assert "governed_definitions=unavailable" in build(
         ontology_enabled=True,
         ontology_fallback="OntologyAgent timed out",
     )
@@ -1773,7 +1791,7 @@ def test_master_exposes_one_agentic_data_pipeline() -> None:
     finally:
         context_var.reset(token)
 
-    assert result.startswith("[STREAMED]")
+    assert json.loads(result)["analysis_status"] == "completed"
     assert [call["agent"] for call in metadata_calls] == ["metadata"]
     assert metadata_calls[0]["require_metadata_mapping"] is True
     assert len(data_calls) == 1
@@ -1834,7 +1852,7 @@ def test_ontology_pipeline_runs_agents_in_strict_sequence() -> None:
     finally:
         context_var.reset(token)
 
-    assert result.startswith("[STREAMED]")
+    assert json.loads(result)["analysis_status"] == "completed"
     assert [call["agent"] for call in calls] == ["ontology", "metadata", "data"]
     assert calls[0]["schema_context"] == ""
     assert calls[1]["ontology_context"] == calls[2]["ontology_context"]
@@ -1887,7 +1905,7 @@ def test_ontology_governed_skill_route_skips_metadata() -> None:
     finally:
         context_var.reset(token)
 
-    assert result.startswith("[STREAMED]")
+    assert json.loads(result)["analysis_status"] == "completed"
     assert [call["agent"] for call in calls] == ["data"]
     assert calls[0]["schema_context"] == ""
     assert calls[0]["ontology_context"] == ""
@@ -1928,7 +1946,7 @@ def test_ontology_failure_is_visible_and_falls_back_to_standard_pipeline() -> No
     finally:
         context_var.reset(token)
 
-    assert result.startswith("[STREAMED]")
+    assert json.loads(result)["analysis_status"] == "completed"
     assert [call["agent"] for call in calls] == ["ontology", "metadata", "data"]
     assert calls[1]["require_metadata_mapping"] is True
     assert calls[2]["ontology_context"] == ""
@@ -1946,6 +1964,7 @@ def test_ontology_failure_is_visible_and_falls_back_to_standard_pipeline() -> No
         if outcome.name == "delegate_data_analysis"
     )
     assert pipeline_outcome.metadata == {
+        "analysis_status": "completed",
         "ontology_requested": True,
         "ontology_applied": False,
         "fallback_used": True,
@@ -1958,6 +1977,7 @@ def test_unavailable_exception_and_empty_ontology_results_all_fall_back() -> Non
         (None, "not available"),
         (_RaisingOntologyAgent(), "ontology query exploded"),
         (_OntologyAgent([], ""), "no usable business context"),
+        (_OntologyAgent([], '{"status":"no_match","confidence":0,"data":{"root_entity":null}}'), "no matched evidence"),
     ]
 
     for index, (ontology_agent, expected_reason) in enumerate(scenarios):
@@ -1986,9 +2006,11 @@ def test_unavailable_exception_and_empty_ontology_results_all_fall_back() -> Non
         finally:
             context_var.reset(token)
 
-        assert result.startswith("[STREAMED]")
+        assert json.loads(result)["analysis_status"] == "completed"
         data_call = next(call for call in calls if call["agent"] == "data")
         assert expected_reason in data_call["ontology_fallback"]
+        assert data_call["ontology_context"] == ""
+        assert next(call for call in calls if call["agent"] == "metadata")["require_metadata_mapping"] is True
         fallback_activity = next(
             payload for event_type, payload in event_queue.items
             if event_type == "activity" and payload.get("category") == "fallback"

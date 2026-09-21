@@ -39,6 +39,17 @@ only the parts it does not cover.
 
 ## Dynamic Planning Workflow
 
+Before exploration, identify the decision rule, requested grain, verified mappings, and unresolved
+gaps. Use `purpose="exploration"` to resolve candidates, then `purpose="analysis"` for the smallest
+query that answers the question. Do not repeatedly submit unchanged SQL. Shared names or a join
+that parses do not establish a business relationship; verify mapping coverage and cardinality.
+Co-occurrence is only a lead unless an authoritative rule establishes the requested violation.
+For example, synthetic billing tests must distinguish same-encounter co-charges from duplicate
+charging under the explicitly supplied test rule; do not invent production medical policy.
+Submit `complete_analysis` with successful result IDs and supported claims in the existing loop.
+Missing rules or encounter/refund mappings require explicit gaps and partial/insufficient status.
+Limited samples cannot establish full-range absence; use complete aggregation or disclose limited scope.
+
 1. Identify the requested outcome from the original question. Select the relevant ontology
    measure, dimension, restriction, hierarchy, and relationship path; do not automatically use
    every suggested factor.
