@@ -1,5 +1,7 @@
 # Ontology Data Agent
 
+English | [简体中文](readme-cn.md)
+
 An intelligent, enterprise-grade data analytics system powered by an OpenAI-compatible LLM API (DeepSeek by default), Microsoft Agent Framework (MAF), an OWL business ontology, and a configurable Databricks or MySQL data source.
 
 ## 🌟 Features

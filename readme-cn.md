@@ -1,5 +1,7 @@
 # Ontology Data Agent（本体数据智能体）
 
+[English](README.md) | 简体中文
+
 一个由 OpenAI 兼容大模型接口（默认 DeepSeek）、Microsoft Agent Framework (MAF)、OWL 业务本体，以及可配置的 Databricks/MySQL 数据源驱动的企业级智能数据分析系统。
 
 ## 🌟 功能特性
