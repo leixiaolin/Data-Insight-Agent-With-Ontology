@@ -6,6 +6,7 @@ import './styles/App.css';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ActivityPanel } from './components/ActivityPanel';
+import { MySQLSettingsModal } from './components/MySQLSettingsModal';
 import type { ActivityItem, ActivityKind, ActivityState } from './types/activity';
 
 // Example questions covering the Databricks analytics and ontology-driven data insight paths
@@ -198,6 +199,7 @@ function App() {
   const [sessionOntologyModes, setSessionOntologyModes] = useState<Map<string, boolean>>(new Map());
   const [loadingSessionIds, setLoadingSessionIds] = useState<Set<string>>(new Set());
   const [businessLayerOpen, setBusinessLayerOpen] = useState(false);
+  const [mysqlSettingsOpen, setMysqlSettingsOpen] = useState(false);
   const [businessLayerDraft, setBusinessLayerDraft] = useState('');
   const [businessLayerStatus, setBusinessLayerStatus] = useState('');
   const [businessLayerBusy, setBusinessLayerBusy] = useState(false);
@@ -834,6 +836,7 @@ function App() {
             {currentSessionId ? `会话：${currentSessionId.substring(0, 20)}...` : 'Ontology Data Agent'}
           </div>
           <div className="header-actions">
+            <button className="icon-btn" onClick={() => setMysqlSettingsOpen(true)} title="配置 MySQL 连接">⚙ MySQL 配置</button>
             <button
               className="icon-btn"
               onClick={openBusinessLayer}
@@ -988,6 +991,7 @@ function App() {
           </div>
         </div>
       )}
+      {mysqlSettingsOpen && <MySQLSettingsModal onClose={() => setMysqlSettingsOpen(false)} />}
     </div>
   );
 }

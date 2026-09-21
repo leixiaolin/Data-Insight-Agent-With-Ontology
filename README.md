@@ -206,6 +206,8 @@ MYSQL_PASSWORD=********
 MYSQL_DATABASES=sales,reporting   # allowlist; first entry is the default database
 ```
 
+MySQL connection settings can also be entered from the **MySQL 配置** button in the chat header. The backend verifies the connection, activates it immediately, and saves it to its local `.env` file. Active queries must finish before a configuration change; existing chat sessions start fresh on their next question. The password is never returned to the browser, and leaving its field empty keeps the existing password.
+
 Rules enforced in MySQL mode:
 
 - Table references must be two-part `database.table` and every database must be inside `MYSQL_DATABASES`; bare table names and three-part `catalog.database.table` forms are rejected.

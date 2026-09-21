@@ -1,5 +1,5 @@
 import axios from 'axios';
-import type { RuntimeConfig, SkillInfo, ThreadSummary } from '../types';
+import type { MySQLSettings, RuntimeConfig, SkillInfo, ThreadSummary } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 
@@ -11,6 +11,14 @@ const apiClient = axios.create({
 });
 
 export const apiService = {
+  async getMySQLSettings(): Promise<MySQLSettings> {
+    const response = await apiClient.get<MySQLSettings>('/config/mysql');
+    return response.data;
+  },
+
+  async saveMySQLSettings(settings: Pick<MySQLSettings, 'host' | 'port' | 'user' | 'databases'> & { password: string }): Promise<void> {
+    await apiClient.put('/config/mysql', settings);
+  },
   // Skills endpoints
   async listSkills(): Promise<SkillInfo[]> {
     const response = await apiClient.get<SkillInfo[]>('/skills');

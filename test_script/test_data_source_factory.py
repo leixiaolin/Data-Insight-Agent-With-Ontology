@@ -18,7 +18,9 @@ def _reset_factory():
     ds._active_provider = None
 
 
-def test_defaults_to_databricks_when_unset() -> None:
+def test_defaults_to_databricks_when_unset(monkeypatch) -> None:
+    monkeypatch.setattr(DataSourceConfig, "RAW_TYPE", "databricks")
+    monkeypatch.setattr(DataSourceConfig, "TYPE", "databricks")
     assert ds.get_active_data_source().name == "databricks"
     assert ds.get_active_metadata_provider().list_tables  # provider constructed
 

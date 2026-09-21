@@ -38,3 +38,12 @@ export interface RuntimeConfig {
     entity_count?: number;
   };
 }
+
+export interface MySQLSettings {
+  host: string;
+  port: number;
+  user: string;
+  databases: string;
+  password_set: boolean;
+  active: boolean;
+}

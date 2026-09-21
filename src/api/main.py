@@ -37,7 +37,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import shutil
+import tempfile
 import unicodedata
 import uuid
 from contextlib import asynccontextmanager
@@ -51,6 +54,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from pydantic import Field
+from dotenv import set_key
+from pathlib import Path
 
 from src.agents import (
     DataInsightAgent,
@@ -59,9 +65,10 @@ from src.agents import (
     OntologyAgent,
 )
 from src.ontology import OntologyService
-from src.config import AppConfig, DataSourceConfig
+from src.config import AppConfig, DataSourceConfig, MySQLConfig
 from src.business_layer import load_business_layer, save_business_layer
-from src.data_sources import get_active_data_source
+from src.data_sources import get_active_data_source, replace_active_source, restore_active_source
+from src.data_sources.mysql import MySQLDataSource
 from src.utils import get_logger
 from src.utils.activity import (
     delegated_agent,
@@ -100,6 +107,8 @@ class AppState:
 
 
 state = AppState()
+configuration_lock = asyncio.Lock()
+MYSQL_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 
 # ─── Lifespan: startup / shutdown ──────────────────────────────────────────────
@@ -194,6 +203,14 @@ class NewThreadRequest(BaseModel):
 
 class BusinessLayerBody(BaseModel):
     content: str
+
+
+class MySQLSettingsBody(BaseModel):
+    host: str = Field(min_length=1)
+    port: int = Field(ge=1, le=65535)
+    user: str = Field(min_length=1)
+    password: str = ""
+    databases: str = Field(min_length=1)
 
 
 class ThreadInfo(BaseModel):
@@ -794,6 +811,115 @@ async def get_runtime_config():
     }
 
 
+@app.get("/config/mysql")
+async def get_mysql_settings():
+    """Return connection settings without revealing the password."""
+    return {
+        "host": MySQLConfig.HOST,
+        "port": MySQLConfig.PORT,
+        "user": MySQLConfig.USER,
+        "databases": ",".join(MySQLConfig.DATABASES),
+        "password_set": bool(MySQLConfig.PASSWORD),
+        "active": DataSourceConfig.TYPE == "mysql",
+    }
+
+
+@app.put("/config/mysql")
+async def put_mysql_settings(body: MySQLSettingsBody):
+    """Validate and activate a MySQL connection, then persist it."""
+    identifiers = [part.strip() for part in body.databases.split(",")]
+    if not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", part) for part in identifiers):
+        raise HTTPException(status_code=422, detail="Invalid MySQL database allowlist")
+    if any("\n" in value or "\r" in value for value in (body.host, body.user, body.password)):
+        raise HTTPException(status_code=422, detail="Newlines are not allowed")
+    env_file = MYSQL_ENV_FILE
+    if not body.password and not MySQLConfig.PASSWORD:
+        raise HTTPException(status_code=422, detail="MySQL password is required")
+    async with configuration_lock:
+        if any(run.task is None or not run.task.done() for run in state.active_runs.values()):
+            raise HTTPException(status_code=409, detail="Wait for active queries to finish before changing MySQL settings")
+        old_config = {
+            "HOST": MySQLConfig.HOST, "PORT": MySQLConfig.PORT,
+            "USER": MySQLConfig.USER, "PASSWORD": MySQLConfig.PASSWORD,
+            "DATABASES": MySQLConfig.DATABASES, "DATABASE": MySQLConfig.DATABASE,
+            "TYPE": DataSourceConfig.TYPE, "RAW_TYPE": DataSourceConfig.RAW_TYPE,
+        }
+        MySQLConfig.HOST = body.host.strip()
+        MySQLConfig.PORT = body.port
+        MySQLConfig.USER = body.user.strip()
+        MySQLConfig.PASSWORD = body.password or MySQLConfig.PASSWORD
+        MySQLConfig.DATABASES = identifiers
+        MySQLConfig.DATABASE = identifiers[0]
+        DataSourceConfig.TYPE = DataSourceConfig.RAW_TYPE = "mysql"
+        candidate = MySQLDataSource()
+        previous = None
+        try:
+            await asyncio.to_thread(_check_mysql_connection, candidate)
+            previous = replace_active_source(candidate)
+            metadata_agent = MetadataAgent()
+            data_insight_agent = DataInsightAgent(
+                metadata_agent=metadata_agent,
+                ontology_agent=OntologyAgent(state.ontology_service) if state.ontology_service else None,
+            )
+            new_master = MasterAgent(
+                data_insight_agent=data_insight_agent,
+                metadata_agent=metadata_agent,
+                ontology_agent=data_insight_agent.ontology_agent,
+            )
+            values = {
+                "DATA_SOURCE_TYPE": "mysql",
+                "MYSQL_HOST": MySQLConfig.HOST,
+                "MYSQL_PORT": str(MySQLConfig.PORT),
+                "MYSQL_USER": MySQLConfig.USER,
+                "MYSQL_DATABASES": ",".join(identifiers),
+            }
+            if body.password:
+                values["MYSQL_PASSWORD"] = body.password
+            env_file.parent.mkdir(parents=True, exist_ok=True)
+            fd, staged_path = tempfile.mkstemp(prefix=".mysql-env-", dir=env_file.parent)
+            os.close(fd)
+            try:
+                if env_file.exists():
+                    shutil.copyfile(env_file, staged_path)
+                for key, value in values.items():
+                    set_key(staged_path, key, value)
+                os.replace(staged_path, env_file)
+            finally:
+                if os.path.exists(staged_path):
+                    os.unlink(staged_path)
+            state.master_agent = new_master
+            state.initialized = True
+            state.init_error = None
+            state.threads.clear()
+            state.thread_history.clear()
+            if previous[0] is not None and isinstance(previous[0], MySQLDataSource):
+                previous_engine = previous[0]._engine
+                if previous_engine is not None:
+                    previous_engine.dispose()
+        except Exception as exc:
+            candidate_engine = candidate._engine
+            if candidate_engine is not None:
+                candidate_engine.dispose()
+            if previous is not None:
+                restore_active_source(previous)
+            MySQLConfig.HOST = old_config["HOST"]
+            MySQLConfig.PORT = old_config["PORT"]
+            MySQLConfig.USER = old_config["USER"]
+            MySQLConfig.PASSWORD = old_config["PASSWORD"]
+            MySQLConfig.DATABASES = old_config["DATABASES"]
+            MySQLConfig.DATABASE = old_config["DATABASE"]
+            DataSourceConfig.TYPE = old_config["TYPE"]
+            DataSourceConfig.RAW_TYPE = old_config["RAW_TYPE"]
+            raise HTTPException(status_code=422, detail=f"Unable to activate MySQL connection: {type(exc).__name__}") from exc
+    return {"ok": True, "restart_required": False}
+
+
+def _check_mysql_connection(source: MySQLDataSource) -> None:
+    from sqlalchemy import text
+    with source.engine().connect() as connection:
+        connection.execute(text("SELECT 1"))
+
+
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
     """
@@ -812,64 +938,65 @@ async def chat_stream(request: ChatRequest):
 
         return StreamingResponse(_error_stream(), media_type="text/event-stream")
 
-    thread_id, thread = _get_or_create_thread(request.thread_id)
-    enable_ontology = (
-        AppConfig.DEFAULT_ENABLE_ONTOLOGY
-        if request.enable_ontology is None
-        else request.enable_ontology
-    )
+    async with configuration_lock:
+        thread_id, thread = _get_or_create_thread(request.thread_id)
+        enable_ontology = (
+            AppConfig.DEFAULT_ENABLE_ONTOLOGY
+            if request.enable_ontology is None
+            else request.enable_ontology
+        )
 
-    existing_run = state.active_runs.get(thread_id)
-    if existing_run is not None:
-        if existing_run.task is None or not existing_run.task.done():
-            raise HTTPException(
-                status_code=409,
-                detail="This session already has an active task.",
+        existing_run = state.active_runs.get(thread_id)
+        if existing_run is not None:
+            if existing_run.task is None or not existing_run.task.done():
+                raise HTTPException(
+                    status_code=409,
+                    detail="This session already has an active task.",
+                )
+            state.active_runs.pop(thread_id, None)
+
+        cached_response = _find_cached_response(
+            thread_id,
+            request.message,
+            enable_ontology,
+        )
+        if cached_response is not None:
+            return StreamingResponse(
+                _cached_response_stream(
+                    request.message,
+                    thread_id,
+                    cached_response,
+                    enable_ontology,
+                ),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Thread-Id": thread_id,
+                    "X-Cache": "HIT",
+                },
             )
-        state.active_runs.pop(thread_id, None)
 
-    cached_response = _find_cached_response(
-        thread_id,
-        request.message,
-        enable_ontology,
-    )
-    if cached_response is not None:
+        active_run = ActiveRun(
+            run_id=str(uuid.uuid4()),
+            cancel_event=Event(),
+        )
+        state.active_runs[thread_id] = active_run
+
         return StreamingResponse(
-            _cached_response_stream(
+            _stream_agent_response(
                 request.message,
+                thread,
                 thread_id,
-                cached_response,
+                active_run,
                 enable_ontology,
+                load_business_layer(),
             ),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
                 "X-Thread-Id": thread_id,
-                "X-Cache": "HIT",
             },
         )
-
-    active_run = ActiveRun(
-        run_id=str(uuid.uuid4()),
-        cancel_event=Event(),
-    )
-    state.active_runs[thread_id] = active_run
-
-    return StreamingResponse(
-        _stream_agent_response(
-            request.message,
-            thread,
-            thread_id,
-            active_run,
-            enable_ontology,
-            load_business_layer(),
-        ),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Thread-Id": thread_id,
-        },
-    )
 
 
 @app.post("/threads/{thread_id}/stop")

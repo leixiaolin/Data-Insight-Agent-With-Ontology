@@ -1,8 +1,8 @@
 """Active data-source factory.
 
-Exactly one backend (databricks | mysql) is active per process, selected by
-DATA_SOURCE_TYPE at import time. Unknown values fall back to databricks with a
-warning so existing deployments keep working unchanged.
+Exactly one backend (databricks | mysql) is active per process. Startup uses
+DATA_SOURCE_TYPE; the MySQL settings API can replace the active source after
+validation. Unknown values fall back to databricks with a warning.
 """
 
 from __future__ import annotations
@@ -30,6 +30,22 @@ __all__ = [
 _active_source: Optional[DataSource] = None
 _active_provider: Optional[MetadataProvider] = None
 _factory_lock = threading.RLock()
+
+
+def replace_active_source(source: DataSource) -> tuple[Optional[DataSource], Optional[MetadataProvider]]:
+    """Atomically install a validated source and discard its old metadata provider."""
+    global _active_source, _active_provider
+    with _factory_lock:
+        previous = (_active_source, _active_provider)
+        _active_source = source
+        _active_provider = None
+        return previous
+
+
+def restore_active_source(previous: tuple[Optional[DataSource], Optional[MetadataProvider]]) -> None:
+    global _active_source, _active_provider
+    with _factory_lock:
+        _active_source, _active_provider = previous
 
 
 def _resolve_type() -> str:

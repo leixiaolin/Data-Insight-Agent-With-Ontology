@@ -3,9 +3,50 @@
 from __future__ import annotations
 
 import asyncio
+from threading import Event
+import pytest
+from fastapi import HTTPException
 from datetime import datetime, timezone
 
 from src.api import main
+
+
+def test_mysql_settings_reject_invalid_allowlist() -> None:
+    body = main.MySQLSettingsBody(host="localhost", port=3306, user="reader", password="secret", databases="sales,other-db")
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(main.put_mysql_settings(body))
+    assert error.value.status_code == 422
+
+
+def test_mysql_settings_wait_for_active_query() -> None:
+    body = main.MySQLSettingsBody(host="localhost", port=3306, user="reader", password="secret", databases="sales")
+    run = main.ActiveRun(run_id="test", cancel_event=Event())
+    main.state.active_runs["test"] = run
+    try:
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(main.put_mysql_settings(body))
+        assert error.value.status_code == 409
+    finally:
+        main.state.active_runs.pop("test", None)
+
+
+def test_mysql_connection_failure_preserves_runtime_settings(monkeypatch, tmp_path) -> None:
+    body = main.MySQLSettingsBody(host="invalid-host", port=3306, user="reader", password="secret", databases="sales")
+    old_host = main.MySQLConfig.HOST
+    old_type = main.DataSourceConfig.TYPE
+    env_file = tmp_path / ".env"
+    monkeypatch.setattr(main, "MYSQL_ENV_FILE", env_file)
+
+    def fail_connection(_source):
+        raise ConnectionError("unavailable")
+
+    monkeypatch.setattr(main, "_check_mysql_connection", fail_connection)
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(main.put_mysql_settings(body))
+    assert error.value.status_code == 422
+    assert main.MySQLConfig.HOST == old_host
+    assert main.DataSourceConfig.TYPE == old_type
+    assert not env_file.exists()
 
 
 class _OntologyCapability:
