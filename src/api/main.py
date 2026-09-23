@@ -43,6 +43,7 @@ import shutil
 import tempfile
 import unicodedata
 import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from threading import Event
@@ -64,7 +65,14 @@ from src.agents import (
     MetadataAgent,
     OntologyAgent,
 )
+from src.api.ontology_management import (
+    attach as attach_ontology_management,
+    bootstrap_ontology_management,
+    register_management_error_handler,
+    router as ontology_router,
+)
 from src.ontology import OntologyService
+from src.ontology.management_errors import ManagementError
 from src.config import AppConfig, DataSourceConfig, MySQLConfig
 from src.business_layer import load_business_layer, save_business_layer
 from src.data_sources import get_active_data_source, replace_active_source, restore_active_source
@@ -97,6 +105,10 @@ class AppState:
     master_agent: Optional[MasterAgent] = None
     ontology_service: Optional[OntologyService] = None
     ontology_error: Optional[str] = None
+    # Governed ontology storage (OntologyStore) once bootstrapped at startup.
+    ontology_management: Optional[object] = None
+    # Bounded thread_id → active_revision map of sessions cleared by activation.
+    invalidated_threads: "OrderedDict[str, str]" = OrderedDict()
     # thread_id (str) → MAF thread object
     threads: Dict[str, object] = {}
     # thread_id → list of {"user": str, "assistant": str, "timestamp": str}
@@ -130,10 +142,21 @@ async def lifespan(app: FastAPI):
 
         ontology_agent: Optional[OntologyAgent] = None
         try:
-            state.ontology_service = OntologyService().load()
-            ontology_agent = OntologyAgent(state.ontology_service)
-            state.ontology_error = state.ontology_service.reasoning_error
-            logger.info("OntologyAgent initialised.")
+            # Startup only trusts the published pointer in the governed store;
+            # seed files are imported exactly once by that store (PRD 6.1).
+            (
+                state.ontology_management,
+                state.ontology_service,
+                ontology_agent,
+                state.ontology_error,
+            ) = bootstrap_ontology_management()
+            if ontology_agent is not None:
+                logger.info("OntologyAgent initialised from the published ontology.")
+            else:
+                logger.warning(
+                    "Ontology capability unavailable (metadata-only): %s",
+                    state.ontology_error,
+                )
         except Exception as ontology_exc:
             state.ontology_service = None
             state.ontology_error = str(ontology_exc)
@@ -189,6 +212,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Ontology management endpoints share the configuration lock and app state.
+app.include_router(ontology_router)
+attach_ontology_management(state, configuration_lock)
+register_management_error_handler(app)
+
 
 # ─── Pydantic models ───────────────────────────────────────────────────────────
 
@@ -196,6 +224,7 @@ class ChatRequest(BaseModel):
     message: str
     thread_id: Optional[str] = None
     enable_ontology: Optional[bool] = None
+    ontology_revision: Optional[str] = None
 
 
 class NewThreadRequest(BaseModel):
@@ -971,6 +1000,32 @@ async def chat_stream(request: ChatRequest):
         return StreamingResponse(_error_stream(), media_type="text/event-stream")
 
     async with configuration_lock:
+        # Sessions cleared by an ontology activation must fail visibly, never
+        # silently continue on a stale thread id (PRD 6.4).
+        reviewed_revision_changed = False
+        if request.ontology_revision is not None and state.ontology_management is not None:
+            active = state.ontology_management.active()
+            reviewed_revision_changed = request.ontology_revision != (active['revision'] if active else '')
+        if reviewed_revision_changed or (
+            request.thread_id is not None
+            and request.thread_id not in state.threads
+            and request.thread_id in state.invalidated_threads
+        ):
+            active_revision = state.invalidated_threads.get(request.thread_id)
+
+            async def _invalidated_stream():
+                yield _sse(
+                    {
+                        "type": "error",
+                        "code": "session_invalidated",
+                        "message": "会话已因本体激活而失效，请重新开始会话。",
+                        "active_revision": active_revision,
+                    }
+                )
+                yield _sse({"type": "done"})
+
+            return StreamingResponse(_invalidated_stream(), media_type="text/event-stream")
+
         thread_id, thread = _get_or_create_thread(request.thread_id)
         enable_ontology = (
             AppConfig.DEFAULT_ENABLE_ONTOLOGY
@@ -1047,17 +1102,18 @@ async def stop_thread_run(thread_id: str):
 @app.post("/threads/new")
 async def create_thread(body: NewThreadRequest = NewThreadRequest()):
     """Create a new conversation thread and return its ID."""
-    if not state.initialized or state.master_agent is None:
-        raise HTTPException(status_code=503, detail="Agent not initialised.")
+    async with configuration_lock:
+        if not state.initialized or state.master_agent is None:
+            raise HTTPException(status_code=503, detail="Agent not initialised.")
 
-    thread = state.master_agent.get_new_thread()
-    thread_id = body.thread_id or str(uuid.uuid4())
-    state.threads[thread_id] = thread
-    state.thread_history[thread_id] = []
-    return {
-        "thread_id": thread_id,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
+        thread = state.master_agent.get_new_thread()
+        thread_id = body.thread_id or str(uuid.uuid4())
+        state.threads[thread_id] = thread
+        state.thread_history[thread_id] = []
+        return {
+            "thread_id": thread_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
 
 
 @app.get("/threads")

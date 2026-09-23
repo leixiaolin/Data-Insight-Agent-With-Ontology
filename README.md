@@ -27,6 +27,7 @@ An intelligent, enterprise-grade data analytics system powered by an OpenAI-comp
 - **Backend API**: FastAPI with Server-Sent Events (port 8000)
 - **Data Analytics**: Azure Databricks Unity Catalog plus SQL Warehouse through the Databricks SQL connector
 - **Ontology Runtime**: Owlready2 with read-only recursive OWL loading; optional HermiT reasoning is disabled by default
+- **Ontology Management**: Online upload/edit/validate/activate with immutable published releases (see [docs/ONTOLOGY-MANAGEMENT.md](docs/ONTOLOGY-MANAGEMENT.md)); MySQL schema-draft generation included
 - **Observability**: Structured activity streaming and rotating application logs, suitable for external evaluation pipelines
 - **Agent Skills**: Extend the agent’s capabilities using agent skills, enabling the agent to analyze data based on real-world business rules.
 - **Unified Data Platform**: Combines verified physical metadata with an existing OWL business ontology while preserving their separate authority boundaries.

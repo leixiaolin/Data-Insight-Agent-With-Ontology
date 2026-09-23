@@ -224,3 +224,44 @@ class MySQLMetadataProvider:
                 if row.get("COLUMN_NAME")
             ],
         }
+
+    def list_foreign_keys(self, *, schema: str) -> list[dict[str, Any]]:
+        """Scope-constrained foreign keys for one database (schema-draft generator).
+
+        MySQL-specific extension of the metadata provider; it is not part of the
+        shared MetadataProvider protocol. Rows are grouped per constraint with
+        ordered source/target column pairs, covering composite and multiple
+        foreign keys between the same tables.
+        """
+        schema = self._allowlisted_database(schema) or ""
+        if not schema:
+            return []
+        rows = self._fetchall(
+            "SELECT CONSTRAINT_NAME, TABLE_NAME, COLUMN_NAME, ORDINAL_POSITION, "
+            "REFERENCED_TABLE_SCHEMA, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME "
+            "FROM information_schema.KEY_COLUMN_USAGE "
+            "WHERE TABLE_SCHEMA = :schema AND REFERENCED_TABLE_NAME IS NOT NULL "
+            "ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION",
+            {"schema": schema},
+        )
+        constraints: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for row in rows:
+            key = (
+                str(row["CONSTRAINT_NAME"]),
+                str(row["TABLE_NAME"]),
+                str(row["REFERENCED_TABLE_NAME"]),
+            )
+            constraint = constraints.setdefault(key, {
+                "constraint": key[0],
+                "schema": schema,
+                "table": key[1],
+                "referenced_table": key[2],
+                "referenced_schema": str(row.get("REFERENCED_TABLE_SCHEMA") or schema),
+                "column_pairs": [],
+            })
+            constraint["column_pairs"].append((
+                str(row["COLUMN_NAME"]),
+                str(row["REFERENCED_COLUMN_NAME"]),
+            ))
+        return sorted(constraints.values(), key=lambda item: (
+            item["table"].casefold(), item["constraint"].casefold()))

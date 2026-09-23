@@ -7,6 +7,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ActivityPanel } from './components/ActivityPanel';
 import { MySQLSettingsModal } from './components/MySQLSettingsModal';
+import { OntologyManagerModal } from './components/OntologyManagerModal';
 import type { ActivityItem, ActivityKind, ActivityState } from './types/activity';
 
 // Example questions covering the Databricks analytics and ontology-driven data insight paths
@@ -200,6 +201,7 @@ function App() {
   const [loadingSessionIds, setLoadingSessionIds] = useState<Set<string>>(new Set());
   const [businessLayerOpen, setBusinessLayerOpen] = useState(false);
   const [mysqlSettingsOpen, setMysqlSettingsOpen] = useState(false);
+  const [ontologyManagerOpen, setOntologyManagerOpen] = useState(false);
   const [businessLayerDraft, setBusinessLayerDraft] = useState('');
   const [businessLayerStatus, setBusinessLayerStatus] = useState('');
   const [businessLayerBusy, setBusinessLayerBusy] = useState(false);
@@ -208,6 +210,9 @@ function App() {
   const programmaticScrollRef = useRef(false);
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const initialSessionRequestedRef = useRef(false);
+  const ontologyChannelRef = useRef<BroadcastChannel | null>(null);
+  const activeOntologyRevisionRef = useRef<string | null>(null);
+  const resetSessionsRef = useRef<() => void>(() => undefined);
 
   const messages = sessionMessages.get(currentSessionId) ?? EMPTY_MESSAGES;
   const isLoading = loadingSessionIds.has(currentSessionId);
@@ -315,6 +320,9 @@ function App() {
       console.error('Failed to load runtime config; using ontology default:', error);
     }
     await createInitialSession(ontologyDefault);
+    try {
+      activeOntologyRevisionRef.current = (await apiService.listOntologyFiles()).active_revision;
+    } catch { /* Chat remains available when management storage needs repair. */ }
   };
 
   const createInitialSession = async (ontologyDefault: boolean) => {
@@ -354,6 +362,62 @@ function App() {
     } catch (error) {
       console.error('Failed to create session:', error);
     }
+  };
+
+  /** Drop every session (this tab) and start one fresh conversation. */
+  const resetAllSessions = async () => {
+    abortControllersRef.current.forEach(controller => controller.abort());
+    abortControllersRef.current.clear();
+    setLoadingSessionIds(new Set());
+    setSessions([]);
+    setSessionMessages(new Map());
+    setSessionOntologyModes(new Map());
+    setCurrentSessionId('');
+    try {
+      activeOntologyRevisionRef.current = (await apiService.listOntologyFiles()).active_revision;
+    } catch { /* The backend still validates invalidated sessions. */ }
+    await createInitialSession(defaultEnableOntology);
+  };
+
+  // Keep a stable reference for callbacks registered once (BroadcastChannel).
+  useEffect(() => {
+    resetSessionsRef.current = () => {
+      void resetAllSessions();
+    };
+  });
+
+  // Cross-tab notification: another tab activated an ontology and reset sessions.
+  useEffect(() => {
+    const checkVersion = () => {
+      void apiService.listOntologyFiles().then(listing => {
+        const previous = activeOntologyRevisionRef.current;
+        activeOntologyRevisionRef.current = listing.active_revision;
+        if (previous !== null && previous !== listing.active_revision) resetSessionsRef.current();
+      }).catch(() => { /* A focus check must not interrupt ongoing chat. */ });
+    };
+    window.addEventListener('focus', checkVersion);
+    return () => window.removeEventListener('focus', checkVersion);
+  }, []);
+
+  // Broadcast is complemented by the focus version check above.
+  useEffect(() => {
+    if (typeof BroadcastChannel === 'undefined') return;
+    const channel = new BroadcastChannel('oda-ontology');
+    channel.onmessage = event => {
+      if (event.data?.type === 'ontology_activated') {
+        resetSessionsRef.current();
+      }
+    };
+    ontologyChannelRef.current = channel;
+    return () => {
+      channel.close();
+      ontologyChannelRef.current = null;
+    };
+  }, []);
+
+  const handleOntologyActivated = () => {
+    ontologyChannelRef.current?.postMessage({ type: 'ontology_activated' });
+    void resetAllSessions();
   };
 
   const switchSession = (sessionId: string) => {
@@ -451,7 +515,8 @@ function App() {
         body: JSON.stringify({
           message: currentInput,
           thread_id: sessionId,
-          enable_ontology: requestOntologyMode
+          enable_ontology: requestOntologyMode,
+          ontology_revision: activeOntologyRevisionRef.current,
         }),
         signal: abortController.signal,
       });
@@ -468,6 +533,7 @@ function App() {
       let sseBuffer = '';
       let activitySequence = 0;
       let didFinalize = false;
+      let sessionInvalidated = false;
 
       const updateAssistantMessage = (content: string, thinking: ActivityItem[]) => {
         updateSessionMessages(sessionId, prev => {
@@ -610,6 +676,11 @@ function App() {
             state: 'error',
             message: data.message || '处理请求时发生错误'
           });
+          if (data.code === 'session_invalidated') {
+            // The server cleared sessions during an ontology activation.
+            sessionInvalidated = true;
+            assistantContent = typeof data.message === 'string' ? data.message : '会话已因本体激活而失效。';
+          }
           throw new Error(typeof data.message === 'string' ? data.message : '处理请求时发生错误');
         }
       };
@@ -651,6 +722,9 @@ function App() {
 
         if (!didFinalize) {
           finalizeAssistantMessage();
+        }
+        if (sessionInvalidated) {
+          resetSessionsRef.current();
         }
       }
     } catch (error) {
@@ -838,6 +912,7 @@ function App() {
             {currentSessionId ? `会话：${currentSessionId.substring(0, 20)}...` : 'Ontology Data Agent'}
           </div>
           <div className="header-actions">
+            <button className="icon-btn" onClick={() => setOntologyManagerOpen(true)} title="上传、编辑、校验并激活本体">🧩 本体管理</button>
             <button className="icon-btn" onClick={() => setMysqlSettingsOpen(true)} title="配置 MySQL 连接">⚙ MySQL 配置</button>
             <button
               className="icon-btn"
@@ -999,6 +1074,12 @@ function App() {
         </div>
       )}
       {mysqlSettingsOpen && <MySQLSettingsModal onClose={() => setMysqlSettingsOpen(false)} />}
+      {ontologyManagerOpen && (
+        <OntologyManagerModal
+          onClose={() => setOntologyManagerOpen(false)}
+          onActivated={handleOntologyActivated}
+        />
+      )}
     </div>
   );
 }

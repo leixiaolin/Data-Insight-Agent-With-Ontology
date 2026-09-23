@@ -124,7 +124,7 @@ def test_preserves_mapping_and_lineage_provenance(
 
     assert mapping["status"] == "partial"
     assert mapping["data"]["requires_metadata_resolution"] is True
-    assert mapping["data"]["physical_mappings"] == {"tables": [], "columns": []}
+    assert mapping["data"]["physical_mappings"] == {"tables": [], "columns": [], "join_columns": []}
     assert joins["status"] == "partial"
     assert joins["data"]["join_paths"]
     assert all(

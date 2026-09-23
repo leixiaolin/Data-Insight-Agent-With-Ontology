@@ -9,6 +9,7 @@ from .settings import (
     DataSourcePolicyConfig,
     MySQLConfig,
     OntologyConfig,
+    OntologyManagementConfig,
     AppConfig,
     validate_config
 )
@@ -22,6 +23,7 @@ __all__ = [
     'DataSourcePolicyConfig',
     'MySQLConfig',
     'OntologyConfig',
+    'OntologyManagementConfig',
     'AppConfig',
     'validate_config'
 ]

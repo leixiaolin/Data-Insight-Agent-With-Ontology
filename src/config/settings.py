@@ -240,6 +240,21 @@ class OntologyConfig:
     )
 
 
+class OntologyManagementConfig:
+    """Single-process governed ontology storage and execution budgets."""
+
+    DIRECTORY = Path(os.getenv('ONTOLOGY_MANAGEMENT_DIR', str(
+        Path(__file__).resolve().parents[2] / 'data' / 'ontology-management'
+    ))).expanduser()
+    MAX_FILE_BYTES = max(1, int(os.getenv('ONTOLOGY_MANAGEMENT_MAX_FILE_BYTES', '5242880')))
+    MAX_FILES = max(1, int(os.getenv('ONTOLOGY_MANAGEMENT_MAX_FILES', '100')))
+    MAX_TOTAL_BYTES = max(1, int(os.getenv('ONTOLOGY_MANAGEMENT_MAX_TOTAL_BYTES', '52428800')))
+    DISK_BYTES = max(1, int(os.getenv('ONTOLOGY_MANAGEMENT_DISK_BYTES', '536870912')))
+    TIMEOUT_SECONDS = max(1, int(os.getenv('ONTOLOGY_MANAGEMENT_TIMEOUT_SECONDS', '30')))
+    MAX_TABLES = max(1, int(os.getenv('ONTOLOGY_GENERATOR_MAX_TABLES', '50')))
+    MAX_COLUMNS = max(1, int(os.getenv('ONTOLOGY_GENERATOR_MAX_COLUMNS', '2000')))
+
+
 class AppConfig:
     """Application-level configuration."""
     
@@ -312,4 +327,3 @@ def validate_config():
         )
     
     return True
-

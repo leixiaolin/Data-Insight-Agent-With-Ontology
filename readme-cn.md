@@ -29,6 +29,7 @@
 - **后端 API**：FastAPI 与 Server-Sent Events（端口 8000）
 - **数据分析**：Azure Databricks Unity Catalog 与 SQL Warehouse，通过 Databricks SQL 连接器访问
 - **本体运行时**：Owlready2 只读递归 OWL 加载；可选的 HermiT 推理默认禁用
+- **本体管理**：在线上传/编辑/校验/激活，发布版本不可变（见 [docs/ONTOLOGY-MANAGEMENT.md](docs/ONTOLOGY-MANAGEMENT.md)）；支持从 MySQL 结构生成草稿
 - **可观测性**：结构化活动流与滚动应用日志，适合外接评估流水线
 - **智能体技能**：使用智能体技能扩展智能体能力，使智能体能够基于真实业务规则分析数据
 - **统一数据平台**：将经过验证的物理元数据与现有 OWL 业务本体相结合，同时保持二者各自的权威边界

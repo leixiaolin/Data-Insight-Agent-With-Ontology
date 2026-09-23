@@ -72,6 +72,10 @@ _LINEAGE_TERMS = {
     "downstreamof",
     "sourceof",
 }
+_JOIN_PAIR_TERMS = {
+    "sourcecolumnpair",
+    "joincolumnpair",
+}
 @dataclass(frozen=True)
 class _EntityRecord:
     entity: Any
@@ -741,11 +745,13 @@ class OntologyService:
                 }
             )
 
+        explicit_join_pairs = self._mapping_annotations(record.entity, _JOIN_PAIR_TERMS)
         physical_mappings = {
             "tables": explicit_tables,
             "columns": explicit_columns,
+            "join_columns": explicit_join_pairs,
         }
-        has_explicit_mapping = bool(explicit_tables or explicit_columns)
+        has_explicit_mapping = bool(explicit_tables or explicit_columns or explicit_join_pairs)
         warnings = []
         if not has_explicit_mapping:
             warnings.append(
@@ -762,7 +768,7 @@ class OntologyService:
             },
             evidence=[
                 {"source": "ontology_annotation", "value": value}
-                for value in [*explicit_tables, *explicit_columns]
+                for value in [*explicit_tables, *explicit_columns, *explicit_join_pairs]
             ],
             confidence=1.0 if has_explicit_mapping else 0.4,
             strategies_tried=[
