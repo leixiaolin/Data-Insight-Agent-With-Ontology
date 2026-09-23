@@ -1,6 +1,7 @@
 """Native agent-loop data-analysis pipeline tests."""
 
 from contextvars import ContextVar
+import asyncio
 import json
 from threading import Event
 from types import SimpleNamespace
@@ -2091,3 +2092,53 @@ def test_ontology_cancellation_stops_without_fallback() -> None:
         event_type == "activity" and payload.get("category") == "fallback"
         for event_type, payload in event_queue.items
     )
+
+
+@pytest.mark.parametrize("user_stop", [False, True])
+def test_data_insight_cancellation_is_contained_at_worker_boundary(monkeypatch, user_stop):
+    import threading
+
+    cancel_event = Event()
+    closed = Event()
+    thread_errors = []
+    monkeypatch.setattr(threading, "excepthook", thread_errors.append)
+
+    class CancellingDataInsight:
+        async def query_stream(self, question, **kwargs):
+            try:
+                yield SimpleNamespace(text="unfinished analysis", contents=[])
+                if user_stop:
+                    cancel_event.set()
+                    await asyncio.Event().wait()
+                else:
+                    raise asyncio.CancelledError()
+            finally:
+                closed.set()
+
+    master = MasterAgent.__new__(MasterAgent)
+    master.agent_id = "data-cancel-test"
+    master.metadata_agent = _MetadataAgent()
+    master.data_insight_agent = CancellingDataInsight()
+    event_queue = _EventQueue()
+    turn = master._new_turn(
+        "monthly sales",
+        stream_context=(event_queue, _ImmediateLoop()),
+        cancel_event=cancel_event,
+        enable_ontology=False,
+    )
+    context_var = master._turn_context_var()
+    token = context_var.set(turn)
+    try:
+        pipeline = next(
+            tool for tool in master._create_tools()
+            if tool.__name__ == "delegate_data_analysis"
+        )
+        result = pipeline("monthly sales")
+    finally:
+        context_var.reset(token)
+
+    assert "cancelled" in result.lower()
+    assert closed.is_set()
+    assert thread_errors == []
+    assert turn.analysis_result is None
+    assert not any(kind == "analysis_result" for kind, _ in event_queue.items)

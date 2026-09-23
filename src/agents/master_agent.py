@@ -1167,6 +1167,10 @@ class MasterAgent:
                     )
                     result_container["task"] = task
                     result_container["result"] = loop.run_until_complete(task)
+                except _asyncio.CancelledError:
+                    # Cancellation is a BaseException, so the ordinary error handler
+                    # below cannot contain it at this worker-thread boundary.
+                    error_container["error"] = RuntimeError("DataInsight query cancelled.")
                 except Exception as exc:
                     error_container["error"] = exc
                     logger.error(f"[data_analysis_pipeline] streaming error: {exc}", exc_info=True)
@@ -1203,6 +1207,8 @@ class MasterAgent:
                     started_at=tool_started_at,
                 )
                 return "DataInsight query timed out (180 s)."
+            if turn is not None and turn.cancelled:
+                return "DataInsight query cancelled by user."
             if error_container["error"]:
                 finish_agent_activity(
                     agent_activity_id,
